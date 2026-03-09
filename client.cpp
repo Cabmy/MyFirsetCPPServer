@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include "util.h"
 
+#define MAX_BUFFER 1024
+
 int main()
 {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -15,17 +17,17 @@ int main()
     serv_addv.sin_addr.s_addr = inet_addr("127.0.0.1");
     serv_addv.sin_port = htons(8888);
 
-    errif(connect(sockfd, (sockaddr *)&serv_addv, sizeof(serv_addv)) == -1, "socket connect error\n");
+    errif(connect(sockfd, (sockaddr *)&serv_addv, sizeof(serv_addv)) == -1, "socket connect error");
 
     while (true)
     {
-        char buf[1024];
+        char buf[MAX_BUFFER];
         bzero(&buf, sizeof(buf));
         scanf("%s", buf);
         ssize_t write_bytes = write(sockfd, buf, sizeof(buf));
         if (write_bytes == -1)
         {
-            errif(true, "server socket disconnect\n");
+            errif(true, "server socket disconnect");
             break;
         }
 
@@ -38,13 +40,13 @@ int main()
         }
         else if (read_bytes == 0)
         {
-            printf("server socket dissconnect\n");
+            printf("server socket dissconnect");
             break;
         }
         else
         {
             close(sockfd);
-            errif(true, "socked read error\n");
+            errif(true, "socked read error");
         }
     }
 
