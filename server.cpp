@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include "util.h"
+#include "InetAddress.h"
 
 #define MAX_EVENTS 1024
 #define MAX_BUFFER 1024
@@ -22,15 +23,18 @@ int main()
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     errif(sockfd == -1, "socket creat error");
 
-    struct sockaddr_in serv_addr; // IPv4专用数据结构，in指internet
-    bzero(&serv_addr, sizeof(serv_addr));
+    // struct sockaddr_in serv_addr; // IPv4专用数据结构，in指internet
+    // bzero(&serv_addr, sizeof(serv_addr));
 
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1"); // 把点分十进制转为32位网络字节序
-    serv_addr.sin_port = htons(8888);                   // host to network short，避免大小端字节序问题
+    // serv_addr.sin_family = AF_INET;
+    // serv_addr.sin_addr.s_addr = inet_addr("127.0.0.1"); // 把点分十进制转为32位网络字节序
+    // serv_addr.sin_port = htons(8888);                   // host to network short，避免大小端字节序问题
 
-    // 转为sockaddr通用类型，支持Ipv6等
-    errif(bind(sockfd, (sockaddr *)&serv_addr, sizeof(serv_addr)) == -1, "socket bind error");
+    /*封装后*/
+    InetAddress *serv_addr = new InetAddress("127.0.0.1", 8888);
+
+    // // 转为sockaddr通用类型，支持Ipv6等
+    // errif(bind(sockfd, (sockaddr *)&serv_addr->getAddr(), sizeof(serv_addr->getAddrLen())) == -1, "socket bind error");
 
     errif(listen(sockfd, SOMAXCONN) == -1, "socket listen error");
 
