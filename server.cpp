@@ -11,6 +11,7 @@
 #include "InetAddress.h"
 #include "Socket.h"
 #include "Epoll.h"
+#include "Channel.h"
 
 #define MAX_EVENTS 1024
 #define MAX_BUFFER 1024
@@ -29,15 +30,16 @@ int main()
 
     // 将服务器socket添加到epoll
     serv_sock->setnonblocking();
-    ep->addFd(serv_sock->getFd(), EPOLLIN | EPOLLET);
+    Channel *servChannel = new Channel(ep, serv_sock->getFd());
+    servChannel->enableReading();
 
     while (true)
     {
-        std::vector<epoll_event> events = ep->activeEvents();
+        std::vector<Channel *> activeChannels = ep->activeChannels();
 
-        for (epoll_event ev : events)
+        for (Channel *aC : activeChannels)
         {
-            if (ev.data.fd == serv_sock->getFd())
+            if (aC->getFd() == serv_sock->getFd())
             {
                 // 新客户端连接
                 /*会发生内存泄露*/
@@ -50,12 +52,13 @@ int main()
 
                 // 将新客户端socket添加到epoll
                 clnt_sock->setnonblocking();
-                ep->addFd(clnt_sock->getFd(), EPOLLIN | EPOLLET);
+                Channel *clntChannel = new Channel(ep, clnt_sock->getFd());
+                clntChannel->enableReading();
             }
-            else if (ev.events & EPOLLIN)
+            else if (aC->getRevents() & EPOLLIN)
             {
                 // 可读事件
-                handleReadEv(ev.data.fd);
+                handleReadEv(aC->getFd());
             }
             else
             {

@@ -40,7 +40,7 @@ int main()
         }
         else if (read_bytes == 0)
         {
-            printf("server socket dissconnect");
+            printf("server socket dissconnect\n");
             break;
         }
         else
