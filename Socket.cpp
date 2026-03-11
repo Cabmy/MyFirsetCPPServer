@@ -2,6 +2,7 @@
 #include "InetAddress.h"
 #include "util.h"
 #include <unistd.h>
+#include <fcntl.h>
 
 Socket::Socket() : fd_(-1)
 {
@@ -23,22 +24,29 @@ Socket::~Socket()
     }
 }
 
-void Socket::Sbind(InetAddress *addr)
+void Socket::bind(InetAddress *addr)
 {
-    errif(bind(fd_, (sockaddr *)&addr->getAddr(), addr->getAddrLen()) == -1, "socket bind error");
+    errif(::bind(fd_, (sockaddr *)&addr->getAddr(), addr->getAddrLen()) == -1, "socket bind error");
 }
 
-void Socket::Slisten()
+void Socket::listen()
 {
+    errif(::listen(fd_, SOMAXCONN) == -1, "socket listen error");
 }
-void Socket::Ssetnonblocking()
+void Socket::setnonblocking()
 {
+    int flags = fcntl(fd_, F_GETFL);
+    fcntl(fd_, F_SETFL, flags | O_NONBLOCK);
 }
 
-int Socket::Saccept(InetAddress *addr)
+int Socket::accept(InetAddress *addr)
 {
+    int clnt_sockfd = ::accept(fd_, (sockaddr *)&addr->getAddr(), &addr->getAddrLen());
+    errif(clnt_sockfd == -1, "socket accept error\n");
+    return clnt_sockfd;
 }
 
 int Socket::getFd()
 {
+    return fd_;
 }

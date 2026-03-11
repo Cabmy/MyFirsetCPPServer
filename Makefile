@@ -5,7 +5,7 @@ TARGETS := server client
 
 all: $(TARGETS)
 
-server: server.cpp util.cpp
+server: server.cpp util.cpp Epoll.cpp InetAddress.cpp Socket.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 client: client.cpp util.cpp

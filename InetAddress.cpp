@@ -19,12 +19,12 @@ InetAddress::~InetAddress()
 {
 }
 
-sockaddr_in InetAddress::getAddr()
+sockaddr_in &InetAddress::getAddr()
 {
     return addr_;
 }
 
-socklen_t InetAddress::getAddrLen()
+socklen_t &InetAddress::getAddrLen()
 {
     return addr_len_;
 }

@@ -12,6 +12,6 @@ public:
     InetAddress(const char *ip, uint16_t port);
     ~InetAddress();
 
-    sockaddr_in getAddr();
-    socklen_t getAddrLen();
+    sockaddr_in &getAddr();
+    socklen_t &getAddrLen();
 };

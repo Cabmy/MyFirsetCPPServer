@@ -11,11 +11,11 @@ public:
     Socket(int fd);
     ~Socket();
 
-    void Sbind(InetAddress *addr);
-    void Slisten();
-    void Ssetnonblocking();
+    void bind(InetAddress *addr);
+    void listen();
+    void setnonblocking();
 
-    int Saccept(InetAddress *addr);
+    int accept(InetAddress *addr);
 
     int getFd();
 };
