@@ -1,22 +1,25 @@
 #pragma once
 #include <sys/epoll.h>
+#include <functional>
 
-class Epoll;
+class EventLoop;
 
 class Channel
 {
 private:
-    Epoll *ep_; // 挂在哪个Epoll树上
+    EventLoop *loop_;
     int fd_;
     uint32_t events_; // 期望监听事件
     uint32_t revent_; // 实际发生事件
     bool inEpoll_;    // 是否挂载
+    std::function<void()> callback_;
 
 public:
-    Channel(Epoll *ep, int fd);
+    Channel(EventLoop *loop, int fd);
     ~Channel();
 
     void enableReading();
+    void handleEvent();
 
     int getFd();
     uint32_t getEvents();
@@ -25,4 +28,5 @@ public:
     void setInEpoll();
 
     void setRevents(uint32_t revents);
+    void setCallback(std::function<void()>);
 };

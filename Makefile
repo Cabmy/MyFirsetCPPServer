@@ -1,14 +1,16 @@
-CXX := g++
-CXXFLAGS := -Wall -Wextra -O2
+CXX = g++
+CXXFLAGS = -std=c++11 -Wall -g -O2 -Isrc
 
-TARGETS := server client
+TARGETS = server client
+
+LIB_SRC = $(wildcard src/*.cpp)
 
 all: $(TARGETS)
 
-server: server.cpp util.cpp Epoll.cpp InetAddress.cpp Socket.cpp Channel.cpp
+server: server.cpp $(LIB_SRC)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
-client: client.cpp util.cpp
+client: client.cpp src/util.cpp
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 clean:
