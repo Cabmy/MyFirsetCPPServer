@@ -2,6 +2,7 @@
 #include "Socket.h"
 #include "Channel.h"
 #include "InetAddress.h"
+#include "Acceptor.h"
 #include <functional>
 #include <string.h>
 #include <stdio.h>
@@ -10,20 +11,11 @@
 
 #define MAX_BUFFER 1024
 
-Server::Server(EventLoop *lp) : loop_(lp)
+Server::Server(EventLoop *lp) : loop_(lp), acceptor_(nullptr)
 {
-    Socket *serv_sock = new Socket();
-    InetAddress *serv_addr = new InetAddress("127.0.0.1", 8888);
-    serv_sock->bind(serv_addr);
-    serv_sock->listen();
-
-    // 将服务器socket添加到epoll
-    serv_sock->setnonblocking();
-    Channel *servChannel = new Channel(loop_, serv_sock->getFd());
-    // 新连接，设置回调函数
-    std::function<void()> cb = std::bind(&Server::newConnection, this, serv_sock);
-    servChannel->setCallback(cb);
-    servChannel->enableReading();
+    acceptor_ = new Acceptor(loop_);
+    std::function<void(Socket *)> cb = std::bind(&Server::newConnection, this, std::placeholders::_1);
+    acceptor_->setNewConnectionCallback(cb);
 }
 
 Server::~Server()
