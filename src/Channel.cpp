@@ -9,6 +9,7 @@ Channel::~Channel()
 {
 }
 
+// 注册到Epoll监听
 void Channel::enableReading()
 {
     events_ = EPOLLIN | EPOLLET;
