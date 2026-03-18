@@ -13,6 +13,7 @@ EventLoop::EventLoop() : ep_(nullptr), ThreadPool_(nullptr), quit_(false)
 EventLoop::~EventLoop()
 {
     delete ep_;
+    delete ThreadPool_;
 }
 
 void EventLoop::loop()

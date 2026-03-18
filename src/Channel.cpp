@@ -18,7 +18,7 @@ void Channel::enableReading()
 
 void Channel::handleEvent()
 {
-    callback_();
+    loop_->addThread(callback_);
 }
 
 int Channel::getFd()
