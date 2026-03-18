@@ -10,7 +10,7 @@ all: $(TARGETS)
 server: server.cpp $(LIB_SRC)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
-client: client.cpp src/util.cpp
+client: client.cpp $(LIB_SRC)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 clean:

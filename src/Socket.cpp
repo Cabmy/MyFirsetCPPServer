@@ -50,3 +50,8 @@ int Socket::getFd()
 {
     return fd_;
 }
+
+void Socket::connect(InetAddress *addr)
+{
+    errif(::connect(fd_, (sockaddr *)&addr->getAddr(), addr->getAddrLen()) == -1, "socket connect error");
+}

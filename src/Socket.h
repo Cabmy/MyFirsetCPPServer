@@ -16,6 +16,8 @@ public:
     void setnonblocking();
 
     int accept(InetAddress *addr);
+    // 客户端连接使用接口
+    void connect(InetAddress *addr);
 
     int getFd();
 };
