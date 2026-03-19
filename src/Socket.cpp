@@ -31,7 +31,8 @@ void Socket::bind(InetAddress *addr)
 
 void Socket::listen()
 {
-    errif(::listen(fd_, SOMAXCONN) == -1, "socket listen error");
+    int backlog = 65535;
+    errif(::listen(fd_, backlog) == -1, "socket listen error");
 }
 void Socket::setnonblocking()
 {

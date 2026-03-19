@@ -11,21 +11,23 @@
 Connection::Connection(EventLoop *loop, Socket *sock) : loop_(loop), sock_(sock)
 {
     channel_ = new Channel(loop, sock->getFd());
-    readBuffer = new Buffer();
-    std::function<void()> cb = std::bind(&Connection::echo, this, sock->getFd());
-    channel_->setCallback(cb);
     channel_->enableReading();
+    channel_->useET();
+    std::function<void()> cb = std::bind(&Connection::echo, this);
+    channel_->setCallback(cb);
+    channel_->setUseThreadPool(true);
 }
 
 Connection::~Connection()
 {
-    delete readBuffer;
     delete channel_;
     delete sock_;
 }
 
-void Connection::echo(int sockfd)
+void Connection::echo()
 {
+    int sockfd = sock_->getFd();
+    Buffer readBuffer; // 使用栈变量
     char buf[1024];
     while (true)
     {
@@ -34,7 +36,7 @@ void Connection::echo(int sockfd)
         ssize_t read_bytes = read(sockfd, buf, sizeof(buf));
         if (read_bytes > 0)
         {
-            readBuffer->append(buf, read_bytes);
+            readBuffer.append(buf, read_bytes);
         }
         else if (read_bytes == -1 && errno == EINTR)
         {
@@ -44,11 +46,15 @@ void Connection::echo(int sockfd)
         }
         else if (read_bytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
+            if (readBuffer.size() == 0)
+            {
+                break;
+            }
             // 已经读完
             printf("finish reading once, errno: %d\n", errno);
-            printf("message from client fd %d: %s\n", sockfd, readBuffer->c_str());
-            errif(write(sockfd, readBuffer->c_str(), readBuffer->size()) == -1, "socket write error");
-            readBuffer->clear();
+            printf("message from client fd %d: %s\n", sockfd, readBuffer.c_str());
+            errif(write(sockfd, readBuffer.c_str(), readBuffer.size()) == -1, "socket write error");
+            readBuffer.clear();
             break;
         }
         else if (read_bytes == 0)
@@ -56,6 +62,12 @@ void Connection::echo(int sockfd)
             // 客户端断开连接
             printf("EOF! client fd %d disconnected\n", sockfd);
             // close(sockfd); // 关闭socket会自动将文件描述符从epoll树上移除
+            deleteConnectionCallback_(sock_);
+            break;
+        }
+        else
+        {
+            printf("Connection reset by peer\n");
             deleteConnectionCallback_(sock_);
             break;
         }

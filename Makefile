@@ -1,7 +1,7 @@
 CXX = g++
 CXXFLAGS = -std=c++11 -Wall -g -O2 -Isrc
 
-TARGETS = server client
+TARGETS = server client test
 
 LIB_SRC = $(wildcard src/*.cpp)
 
@@ -11,6 +11,9 @@ server: server.cpp $(LIB_SRC)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 client: client.cpp $(LIB_SRC)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+test: test.cpp $(LIB_SRC)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 clean:

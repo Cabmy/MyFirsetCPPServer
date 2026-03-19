@@ -1,5 +1,6 @@
 #include "Buffer.h"
 #include <iostream>
+#include <cstring>
 
 Buffer::Buffer()
 {
@@ -57,4 +58,16 @@ void Buffer::getline()
     std::string line;
     std::getline(std::cin, line);
     buf_.assign(line.begin(), line.end());
+}
+
+void Buffer::setBuf(const char *str)
+{
+    buf_.clear();
+    if (str == nullptr)
+    {
+        return;
+    }
+
+    const size_t len = std::strlen(str);
+    buf_.assign(str, str + len);
 }

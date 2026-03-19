@@ -11,7 +11,7 @@ class Server
 private:
     EventLoop *loop_;
     Acceptor *acceptor_;
-    std::map<int, Connection *> connections;
+    std::map<int, Connection *> connections_;
 
 public:
     Server(EventLoop *lp);

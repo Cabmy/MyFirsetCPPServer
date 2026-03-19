@@ -24,15 +24,30 @@ Server::~Server()
 
 void Server::newConnection(Socket *sock)
 {
+    if (sock->getFd() == -1)
+    {
+        return;
+    }
+
     Connection *conn = new Connection(loop_, sock);
     std::function<void(Socket *)> cb = std::bind(&Server::deleteConnection, this, std::placeholders::_1);
     conn->setDeleteConnectionCallback(cb);
-    connections[sock->getFd()] = conn;
+    connections_[sock->getFd()] = conn;
 }
 
 void Server::deleteConnection(Socket *sock)
 {
-    Connection *conn = connections[sock->getFd()];
-    connections.erase(sock->getFd());
-    delete conn;
+    int fd = sock->getFd();
+    if (fd == -1)
+    {
+        return;
+    }
+
+    auto it = connections_.find(fd);
+    if (it != connections_.end())
+    {
+        Connection *conn = connections_[fd];
+        connections_.erase(fd);
+        delete conn;
+    }
 }
