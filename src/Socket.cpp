@@ -3,11 +3,14 @@
 #include "util.h"
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/socket.h>
 
 Socket::Socket() : fd_(-1)
 {
     fd_ = socket(AF_INET, SOCK_STREAM, 0);
     errif(fd_ == -1, "socket create error");
+    int optval = 1;
+    setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
 }
 
 Socket::Socket(int fd) : fd_(fd)
@@ -43,7 +46,6 @@ void Socket::setnonblocking()
 int Socket::accept(InetAddress *addr)
 {
     int clnt_sockfd = ::accept(fd_, (sockaddr *)&addr->getAddr(), &addr->getAddrLen());
-    errif(clnt_sockfd == -1, "socket accept error\n");
     return clnt_sockfd;
 }
 

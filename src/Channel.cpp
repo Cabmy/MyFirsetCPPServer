@@ -1,7 +1,7 @@
 #include "Channel.h"
 #include "EventLoop.h"
 
-Channel::Channel(EventLoop *loop, int fd) : loop_(loop), fd_(fd), events_(0), revent_(0), inEpoll_(false), useThreadPool_(true)
+Channel::Channel(EventLoop *loop, int fd) : loop_(loop), fd_(fd), events_(0), revent_(0), inEpoll_(false)
 {
 }
 
@@ -20,14 +20,7 @@ void Channel::handleEvent()
 {
     if (revent_ & (EPOLLIN | EPOLLPRI))
     {
-        if (useThreadPool_)
-        {
-            loop_->addThread(callback_);
-        }
-        else
-        {
-            callback_();
-        }
+        callback_();
     }
 }
 
@@ -70,9 +63,4 @@ void Channel::setRevents(uint32_t ev)
 void Channel::setCallback(std::function<void()> cb)
 {
     callback_ = cb;
-}
-
-void Channel::setUseThreadPool(bool use)
-{
-    useThreadPool_ = use;
 }

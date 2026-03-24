@@ -1,10 +1,11 @@
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
 #include "Epoll.h"
 #include "util.h"
 #include "Channel.h"
 
-#define MAX_EVENTS_ 1024
+#define MAX_EVENTS_ 4096
 
 Epoll::Epoll() : epfd_(-1), events_(MAX_EVENTS_)
 {
@@ -35,7 +36,10 @@ std::vector<Channel *> Epoll::activeChannels(int timeout)
 {
     std::vector<Channel *> activeChannels;
     int nfds = epoll_wait(epfd_, events_.data(), MAX_EVENTS_, timeout);
-    errif(nfds == -1, "epoll wait error");
+    if (nfds == -1) {
+        if (errno == EINTR) return {};
+        errif(true, "epoll wait error");
+    }
 
     for (int i = 0; i < nfds; ++i)
     {

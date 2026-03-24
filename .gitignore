@@ -1,7 +1,8 @@
 .vscode/
-./output
+/output
 30dayMakeCppServer/
 client
 server
 pipeline.md
-test
+CLAUDE.md
+/build

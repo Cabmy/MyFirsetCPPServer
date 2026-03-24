@@ -1,8 +1,8 @@
-#include "src/Socket.h"
-#include "src/Buffer.h"
-#include "src/Connection.h"
-#include "src/InetAddress.h"
-#include "src/util.h"
+#include "Socket.h"
+#include "Buffer.h"
+#include "Connection.h"
+#include "InetAddress.h"
+#include "util.h"
 #include <iostream>
 #include <unistd.h>
 #include <string.h>
