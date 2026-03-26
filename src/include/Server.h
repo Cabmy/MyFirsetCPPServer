@@ -19,6 +19,7 @@ private:
     std::mutex connMtx_;
     std::vector<std::unique_ptr<EventLoop>> subReactors_;
     std::unique_ptr<ThreadPool> thPool_;
+    std::unique_ptr<ThreadPool> dbPool_;
 
 public:
     Server(EventLoop *lp);

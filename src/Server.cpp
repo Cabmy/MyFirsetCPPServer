@@ -31,6 +31,9 @@ Server::Server(EventLoop *lp) : mainReactor_(lp), acceptor_(nullptr)
         std::function<void()> sub_loop = std::bind(&EventLoop::loop, subReactors_[i].get());
         thPool_->add(sub_loop);
     }
+
+    // DB thread pool for blocking MySQL/Redis operations
+    dbPool_ = std::make_unique<ThreadPool>(4);
 }
 
 Server::~Server()
@@ -45,7 +48,7 @@ void Server::newConnection(std::unique_ptr<Socket> sock)
     }
     int fd = sock->getFd();
     int random = sock->getFd() % subReactors_.size();
-    auto conn = std::make_unique<Connection>(subReactors_[random].get(), std::move(sock));
+    auto conn = std::make_unique<Connection>(subReactors_[random].get(), std::move(sock), dbPool_.get());
     std::function<void(int)> cb = std::bind(&Server::deleteConnection, this, std::placeholders::_1);
     conn->setDeleteConnectionCallback(cb);
     {
