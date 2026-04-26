@@ -12,13 +12,20 @@ Channel::~Channel()
 // 注册到Epoll监听
 void Channel::enableReading()
 {
-    events_ |= EPOLLIN | EPOLLPRI;
+    events_ |= EPOLLIN | EPOLLPRI | EPOLLRDHUP;
+    loop_->updateChannel(this);
+}
+
+// 一次性注册 IN|PRI|RDHUP|ET, 避免 ADD+MOD 双重 epoll_ctl
+void Channel::enableReadingET()
+{
+    events_ |= EPOLLIN | EPOLLPRI | EPOLLRDHUP | EPOLLET;
     loop_->updateChannel(this);
 }
 
 void Channel::handleEvent()
 {
-    if (revent_ & (EPOLLIN | EPOLLPRI))
+    if (revent_ & (EPOLLIN | EPOLLPRI | EPOLLRDHUP | EPOLLHUP | EPOLLERR))
     {
         callback_();
     }

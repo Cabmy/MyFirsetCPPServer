@@ -33,7 +33,6 @@ void Acceptor::acceptConnection()
             perror("accept error");
             break;
         }
-        printf("new client fd %d! IP: %s Port: %d\n", clnt_fd, inet_ntoa(clnt_addr.getAddr().sin_addr), ntohs(clnt_addr.getAddr().sin_port));
         auto clnt_sock = std::make_unique<Socket>(clnt_fd);
         clnt_sock->setnonblocking();
         newConnectionCallback_(std::move(clnt_sock));

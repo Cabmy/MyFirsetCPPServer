@@ -21,11 +21,10 @@
 Connection::Connection(EventLoop *loop, std::unique_ptr<Socket> sock, ThreadPool *dbPool)
     : loop_(loop), sock_(std::move(sock)), dbPool_(dbPool)
 {
-    channel_ = std::make_unique<Channel>(loop, sock_->getFd());
-    channel_->enableReading();
-    channel_->useET();
+    channel_ = std::make_unique<Channel>(loop_, sock_->getFd());
     std::function<void()> cb = std::bind(&Connection::handleMessage, this);
     channel_->setCallback(cb);
+    channel_->enableReadingET();
 }
 
 Connection::~Connection()
@@ -118,9 +117,12 @@ void Connection::sendHttpResponse(int fd, int statusCode, const std::string &con
 
     std::string response =
         "HTTP/1.1 " + std::to_string(statusCode) + " " + statusText + "\r\n"
-        "Content-Type: " + contentType + "\r\n"
-        "Content-Length: " + std::to_string(body.size()) + "\r\n"
-        "Connection: close\r\n\r\n" + body;
+                                                                      "Content-Type: " +
+        contentType + "\r\n"
+                      "Content-Length: " +
+        std::to_string(body.size()) + "\r\n"
+                                      "Connection: close\r\n\r\n" +
+        body;
 
     const char *data = response.c_str();
     ssize_t total = response.size();
@@ -175,7 +177,7 @@ void Connection::handleRegister(const std::string &request, int fd)
 
     // Submit blocking DB work to the DB thread pool
     dbPool_->add([fd, username, password]()
-    {
+                 {
         MysqlGuard guard;
         MYSQL *conn = guard.get();
 
@@ -211,8 +213,7 @@ void Connection::handleRegister(const std::string &request, int fd)
             return;
         }
 
-        sendHttpResponse(fd, 200, "application/json", "{\"message\":\"register success\"}");
-    });
+        sendHttpResponse(fd, 200, "application/json", "{\"message\":\"register success\"}"); });
 }
 
 void Connection::handleLogin(const std::string &request, int fd)
@@ -228,7 +229,7 @@ void Connection::handleLogin(const std::string &request, int fd)
     }
 
     dbPool_->add([fd, username, password]()
-    {
+                 {
         std::string dbPassword;
         bool found = false;
 
@@ -300,8 +301,7 @@ void Connection::handleLogin(const std::string &request, int fd)
 #endif
 
         sendHttpResponse(fd, 200, "application/json",
-                         "{\"message\":\"login success\",\"token\":\"" + token + "\"}");
-    });
+                         "{\"message\":\"login success\",\"token\":\"" + token + "\"}"); });
 }
 
 // ==================== Main Handler ====================
@@ -358,13 +358,11 @@ void Connection::handleMessage()
         }
         else if (read_bytes == 0)
         {
-            printf("EOF! client fd %d disconnected\n", sockfd);
             deleteConnectionCallback_(sock_->getFd());
             break;
         }
         else
         {
-            printf("Connection reset by peer\n");
             deleteConnectionCallback_(sock_->getFd());
             break;
         }

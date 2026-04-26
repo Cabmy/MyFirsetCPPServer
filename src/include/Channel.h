@@ -19,6 +19,7 @@ public:
     ~Channel();
 
     void enableReading();
+    void enableReadingET();
     void handleEvent();
 
     int getFd();

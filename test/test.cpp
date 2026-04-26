@@ -1,14 +1,23 @@
+// HTTP 短连接压测客户端
+// 架构: 多 worker 线程, 每线程独立 epoll-ET 实例, 状态机驱动
+// 协议: HTTP/1.1 GET /, 服务器恒发 Connection: close, 故每条 msg 后需重连
+//
+// 命令行: -c slots -m msgs/slot -t threads -s ip -p port
+//   slots:     总并发槽位 (类似 wrk 的 -c)
+//   msgs/slot: 每个槽位完成多少次完整请求-响应循环
+//   总请求数 = slots * msgs
+
 #include <iostream>
 #include <vector>
 #include <thread>
 #include <atomic>
-#include <mutex>
 #include <chrono>
 #include <algorithm>
 #include <numeric>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -16,20 +25,33 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-// ==================== 数据结构 ====================
+// ==================== 状态机 ====================
 
-enum class Phase { CONNECTING, WRITING, READING, DONE, FAILED };
+enum class Phase {
+    CONNECTING,
+    WRITING,
+    READING_HEADERS,
+    READING_BODY,
+    DONE,
+    FAILED
+};
 
 struct ConnState {
     int fd = -1;
     Phase phase = Phase::CONNECTING;
-    int msgs_sent = 0;
+    int msgs_done = 0;
     int msgs_target = 0;
-    int bytes_written = 0;
-    int bytes_read = 0;
-    int bytes_expected = 0;
-    char send_buf[128];
-    char read_buf[128];
+
+    // 写
+    std::string request;
+    size_t bytes_written = 0;
+
+    // 读
+    std::string response;
+    int header_end = -1;       // \r\n\r\n 的位置
+    int content_length = -1;
+    int total_expected = -1;   // header_end + 4 + content_length
+
     std::chrono::steady_clock::time_point send_time;
     std::vector<double> latencies_us;
 };
@@ -37,10 +59,15 @@ struct ConnState {
 struct WorkerStats {
     int connected_ok = 0;
     int connect_fail = 0;
-    int messages_ok = 0;
-    int verify_fail = 0;
+    int requests_ok = 0;       // 完整收到响应的请求数 (含非200)
+    int verify_fail = 0;       // 响应不是 HTTP/1.1 200 的次数
+    int request_timeout = 0;   // 单请求超过 PER_REQ_TIMEOUT_SEC 未收到响应
     std::vector<double> latencies_us;
 };
+
+// 单个请求 (从 connect 开始计时) 超过此秒数视为超时, 放弃当前 slot.
+// 避免服务端 bug 导致 stuck slot 拖垮整个测试.
+static const double PER_REQ_TIMEOUT_SEC = 5.0;
 
 // ==================== 辅助函数 ====================
 
@@ -48,6 +75,14 @@ static void set_nonblocking(int fd)
 {
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static void epoll_add(int epfd, int fd, uint32_t events, uint32_t data)
+{
+    struct epoll_event ev;
+    ev.events = events;
+    ev.data.u32 = data;
+    epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
 }
 
 static void epoll_mod(int epfd, int fd, uint32_t events, uint32_t data)
@@ -58,6 +93,99 @@ static void epoll_mod(int epfd, int fd, uint32_t events, uint32_t data)
     epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev);
 }
 
+// 解析 HTTP 响应 header. 成功后填充 cs.header_end / content_length / total_expected.
+// 返回 true 表示 header 已完整接收.
+static bool parse_http_headers(ConnState &cs)
+{
+    size_t pos = cs.response.find("\r\n\r\n");
+    if (pos == std::string::npos) {
+        return false;
+    }
+    cs.header_end = static_cast<int>(pos);
+
+    // 仅在 header 范围内查找 Content-Length
+    size_t cl = cs.response.find("Content-Length:");
+    if (cl == std::string::npos || cl >= pos) {
+        cs.content_length = 0;
+    } else {
+        size_t v = cl + sizeof("Content-Length:") - 1;
+        while (v < pos && (cs.response[v] == ' ' || cs.response[v] == '\t')) v++;
+        cs.content_length = std::atoi(cs.response.c_str() + v);
+    }
+    cs.total_expected = cs.header_end + 4 + cs.content_length;
+    return true;
+}
+
+// ==================== 重连 (短连接所需) ====================
+
+static bool reconnect(int epfd, ConnState &cs, uint32_t idx,
+                      const sockaddr_in &serv_addr, WorkerStats &stats)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        cs.phase = Phase::FAILED;
+        stats.connect_fail++;
+        return false;
+    }
+    set_nonblocking(fd);
+
+    cs.fd = fd;
+    cs.bytes_written = 0;
+    cs.response.clear();
+    cs.header_end = -1;
+    cs.content_length = -1;
+    cs.total_expected = -1;
+
+    int ret = ::connect(fd, (sockaddr *)&serv_addr, sizeof(serv_addr));
+    if (ret == 0) {
+        stats.connected_ok++;
+        cs.send_time = std::chrono::steady_clock::now();
+        cs.phase = Phase::WRITING;
+        epoll_add(epfd, fd, EPOLLOUT | EPOLLET, idx);
+    } else if (errno == EINPROGRESS) {
+        cs.phase = Phase::CONNECTING;
+        cs.send_time = std::chrono::steady_clock::now();
+        epoll_add(epfd, fd, EPOLLOUT | EPOLLET, idx);
+    } else {
+        close(fd);
+        cs.fd = -1;
+        cs.phase = Phase::FAILED;
+        stats.connect_fail++;
+        return false;
+    }
+    return true;
+}
+
+// 完成一次 HTTP 请求-响应循环, 计算延迟, 决定重连或结束
+static void finish_one_request(int epfd, ConnState &cs, uint32_t idx,
+                                const sockaddr_in &serv_addr, WorkerStats &stats)
+{
+    auto now = std::chrono::steady_clock::now();
+    double lat = std::chrono::duration<double, std::micro>(now - cs.send_time).count();
+    cs.latencies_us.push_back(lat);
+    stats.requests_ok++;
+
+    // 校验状态码
+    if (cs.response.size() < 12 || cs.response.compare(0, 12, "HTTP/1.1 200") != 0) {
+        stats.verify_fail++;
+    }
+
+    cs.msgs_done++;
+
+    // 关闭当前 fd (server 发了 Connection: close)
+    if (cs.fd >= 0) {
+        epoll_ctl(epfd, EPOLL_CTL_DEL, cs.fd, nullptr);
+        close(cs.fd);
+        cs.fd = -1;
+    }
+
+    if (cs.msgs_done >= cs.msgs_target) {
+        cs.phase = Phase::DONE;
+    } else {
+        reconnect(epfd, cs, idx, serv_addr, stats);
+    }
+}
+
 // ==================== 事件处理 ====================
 
 static void handle_connect(int epfd, ConnState &cs, uint32_t idx, WorkerStats &stats)
@@ -66,18 +194,14 @@ static void handle_connect(int epfd, ConnState &cs, uint32_t idx, WorkerStats &s
     socklen_t len = sizeof(err);
     getsockopt(cs.fd, SOL_SOCKET, SO_ERROR, &err, &len);
     if (err != 0) {
-        cs.phase = Phase::FAILED;
+        epoll_ctl(epfd, EPOLL_CTL_DEL, cs.fd, nullptr);
         close(cs.fd);
         cs.fd = -1;
+        cs.phase = Phase::FAILED;
         stats.connect_fail++;
         return;
     }
     stats.connected_ok++;
-    // 准备第一条消息
-    cs.msgs_sent = 0;
-    cs.bytes_expected = snprintf(cs.send_buf, sizeof(cs.send_buf),
-                                  "hello from conn %u", idx);
-    cs.bytes_written = 0;
     cs.send_time = std::chrono::steady_clock::now();
     cs.phase = Phase::WRITING;
     epoll_mod(epfd, cs.fd, EPOLLOUT | EPOLLET, idx);
@@ -85,79 +209,81 @@ static void handle_connect(int epfd, ConnState &cs, uint32_t idx, WorkerStats &s
 
 static void handle_write(int epfd, ConnState &cs, uint32_t idx, WorkerStats &stats)
 {
-    while (cs.bytes_written < cs.bytes_expected) {
-        ssize_t n = write(cs.fd, cs.send_buf + cs.bytes_written,
-                          cs.bytes_expected - cs.bytes_written);
+    while (cs.bytes_written < cs.request.size()) {
+        ssize_t n = write(cs.fd, cs.request.data() + cs.bytes_written,
+                          cs.request.size() - cs.bytes_written);
         if (n > 0) {
             cs.bytes_written += n;
         } else if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return; // 等下次 EPOLLOUT
+            return;
+        } else if (n == -1 && errno == EINTR) {
+            continue;
         } else {
-            cs.phase = Phase::FAILED;
+            epoll_ctl(epfd, EPOLL_CTL_DEL, cs.fd, nullptr);
             close(cs.fd);
             cs.fd = -1;
+            cs.phase = Phase::FAILED;
             return;
         }
     }
-    // 写完，切换到读
-    cs.bytes_read = 0;
-    cs.phase = Phase::READING;
+    cs.phase = Phase::READING_HEADERS;
     epoll_mod(epfd, cs.fd, EPOLLIN | EPOLLET, idx);
 }
 
-static void handle_read(int epfd, ConnState &cs, uint32_t idx, WorkerStats &stats)
+static void handle_read(int epfd, ConnState &cs, uint32_t idx,
+                        const sockaddr_in &serv_addr, WorkerStats &stats)
 {
-    while (cs.bytes_read < cs.bytes_expected) {
-        ssize_t n = read(cs.fd, cs.read_buf + cs.bytes_read,
-                         cs.bytes_expected - cs.bytes_read);
+    char buf[4096];
+    bool peer_closed = false;
+
+    while (true) {
+        ssize_t n = read(cs.fd, buf, sizeof(buf));
         if (n > 0) {
-            cs.bytes_read += n;
+            cs.response.append(buf, n);
         } else if (n == 0) {
-            // 服务端关闭
-            cs.phase = Phase::FAILED;
-            close(cs.fd);
-            cs.fd = -1;
-            return;
+            peer_closed = true;
+            break;
         } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            return; // 等下次 EPOLLIN
+            break;
+        } else if (errno == EINTR) {
+            continue;
         } else {
-            cs.phase = Phase::FAILED;
+            epoll_ctl(epfd, EPOLL_CTL_DEL, cs.fd, nullptr);
             close(cs.fd);
             cs.fd = -1;
+            cs.phase = Phase::FAILED;
             return;
         }
     }
 
-    // 读完一条消息，记录延迟
-    auto now = std::chrono::steady_clock::now();
-    double lat = std::chrono::duration<double, std::micro>(now - cs.send_time).count();
-    cs.latencies_us.push_back(lat);
-
-    // 验证 echo
-    if (memcmp(cs.send_buf, cs.read_buf, cs.bytes_expected) != 0) {
-        stats.verify_fail++;
+    // 阶段一: 找 \r\n\r\n
+    if (cs.phase == Phase::READING_HEADERS) {
+        if (parse_http_headers(cs)) {
+            cs.phase = Phase::READING_BODY;
+        }
     }
-    stats.messages_ok++;
 
-    cs.msgs_sent++;
-    if (cs.msgs_sent >= cs.msgs_target) {
-        // 全部完成
-        cs.phase = Phase::DONE;
+    // 阶段二: 等 body 读够
+    if (cs.phase == Phase::READING_BODY) {
+        if (cs.total_expected >= 0 &&
+            static_cast<int>(cs.response.size()) >= cs.total_expected) {
+            finish_one_request(epfd, cs, idx, serv_addr, stats);
+            return;
+        }
+    }
+
+    // 服务端关闭但响应不完整 -> 失败
+    if (peer_closed) {
         epoll_ctl(epfd, EPOLL_CTL_DEL, cs.fd, nullptr);
         close(cs.fd);
         cs.fd = -1;
-    } else {
-        // 发下一条消息
-        cs.bytes_written = 0;
-        cs.send_time = std::chrono::steady_clock::now();
-        cs.phase = Phase::WRITING;
-        epoll_mod(epfd, cs.fd, EPOLLOUT | EPOLLET, idx);
+        cs.phase = Phase::FAILED;
     }
 }
 
-// ==================== Worker 线程 ====================
+// ==================== Worker ====================
 
-static void worker_run(int thread_id, int conn_count, int msgs_per_conn,
+static void worker_run(int thread_id, int slot_count, int msgs_per_slot,
                         const char *server_ip, uint16_t port,
                         WorkerStats &stats)
 {
@@ -167,21 +293,33 @@ static void worker_run(int thread_id, int conn_count, int msgs_per_conn,
         return;
     }
 
-    struct sockaddr_in serv_addr;
+    sockaddr_in serv_addr;
     memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
     inet_pton(AF_INET, server_ip, &serv_addr.sin_addr);
 
-    std::vector<ConnState> conns(conn_count);
+    // 预生成 HTTP 请求文本
+    char req_buf[256];
+    int rlen = snprintf(req_buf, sizeof(req_buf),
+                        "GET / HTTP/1.1\r\n"
+                        "Host: %s:%u\r\n"
+                        "User-Agent: stress-test\r\n"
+                        "\r\n",
+                        server_ip, port);
+    std::string http_request(req_buf, rlen);
 
-    // 分批建立连接
-    const int BATCH = 100;
+    std::vector<ConnState> conns(slot_count);
     int active = 0;
 
-    for (int i = 0; i < conn_count; i += BATCH) {
-        int end = std::min(i + BATCH, conn_count);
+    // 分批建连, 避免 SYN 洪泛
+    const int BATCH = 100;
+    for (int i = 0; i < slot_count; i += BATCH) {
+        int end = std::min(i + BATCH, slot_count);
         for (int j = i; j < end; ++j) {
+            conns[j].msgs_target = msgs_per_slot;
+            conns[j].request = http_request;
+
             int fd = socket(AF_INET, SOCK_STREAM, 0);
             if (fd < 0) {
                 conns[j].phase = Phase::FAILED;
@@ -189,169 +327,182 @@ static void worker_run(int thread_id, int conn_count, int msgs_per_conn,
                 continue;
             }
             set_nonblocking(fd);
-
             conns[j].fd = fd;
-            conns[j].msgs_target = msgs_per_conn;
 
             int ret = ::connect(fd, (sockaddr *)&serv_addr, sizeof(serv_addr));
-
-            struct epoll_event ev;
-            ev.data.u32 = j;
-
             if (ret == 0) {
-                // 立即连接成功（本地回环常见）
                 stats.connected_ok++;
-                conns[j].bytes_expected = snprintf(conns[j].send_buf,
-                    sizeof(conns[j].send_buf), "hello from conn %d-%d", thread_id, j);
-                conns[j].bytes_written = 0;
                 conns[j].send_time = std::chrono::steady_clock::now();
                 conns[j].phase = Phase::WRITING;
-                ev.events = EPOLLOUT | EPOLLET;
+                epoll_add(epfd, fd, EPOLLOUT | EPOLLET, j);
             } else if (errno == EINPROGRESS) {
                 conns[j].phase = Phase::CONNECTING;
-                conns[j].bytes_expected = snprintf(conns[j].send_buf,
-                    sizeof(conns[j].send_buf), "hello from conn %d-%d", thread_id, j);
-                ev.events = EPOLLOUT | EPOLLET;
+                conns[j].send_time = std::chrono::steady_clock::now();
+                epoll_add(epfd, fd, EPOLLOUT | EPOLLET, j);
             } else {
-                conns[j].phase = Phase::FAILED;
                 close(fd);
                 conns[j].fd = -1;
+                conns[j].phase = Phase::FAILED;
                 stats.connect_fail++;
                 continue;
             }
-
-            epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
             active++;
         }
-        if (i + BATCH < conn_count) {
-            usleep(1000); // 批次间 1ms 延迟
-        }
+        if (i + BATCH < slot_count) usleep(1000);
     }
 
     // 事件循环
     const int MAX_EVENTS = 1024;
-    struct epoll_event events[MAX_EVENTS];
-    int timeout_count = 0;
+    epoll_event events[MAX_EVENTS];
+    int idle_ticks = 0;
 
     while (active > 0) {
-        int n = epoll_wait(epfd, events, MAX_EVENTS, 1000);
+        int n = epoll_wait(epfd, events, MAX_EVENTS, 500);
+        if (n == -1) {
+            if (errno == EINTR) continue;
+            perror("epoll_wait");
+            break;
+        }
+
+        // 扫描每个 slot, 标记超时的为 FAILED
+        // (服务端 bug 可能让某些 slot 永不收到响应)
+        auto now_ts = std::chrono::steady_clock::now();
+        for (size_t k = 0; k < conns.size(); ++k) {
+            ConnState &cs = conns[k];
+            if (cs.phase == Phase::DONE || cs.phase == Phase::FAILED) continue;
+            double elapsed = std::chrono::duration<double>(now_ts - cs.send_time).count();
+            if (elapsed > PER_REQ_TIMEOUT_SEC) {
+                if (cs.fd >= 0) {
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, cs.fd, nullptr);
+                    close(cs.fd);
+                    cs.fd = -1;
+                }
+                cs.phase = Phase::FAILED;
+                stats.request_timeout++;
+                active--;
+            }
+        }
+        if (active <= 0) break;
+
         if (n == 0) {
-            timeout_count++;
-            if (timeout_count >= 30) {
-                // 超时 30 秒，放弃剩余连接
-                fprintf(stderr, "[thread %d] timeout, %d connections still active\n",
+            if (++idle_ticks >= 60) {
+                fprintf(stderr, "[thread %d] global idle, %d slots still active\n",
                         thread_id, active);
                 break;
             }
             continue;
         }
-        timeout_count = 0;
+        idle_ticks = 0;
 
         for (int i = 0; i < n; ++i) {
             uint32_t idx = events[i].data.u32;
             ConnState &cs = conns[idx];
             uint32_t ev = events[i].events;
 
+            Phase before = cs.phase;
+
             if (ev & (EPOLLERR | EPOLLHUP)) {
                 if (cs.phase == Phase::CONNECTING) {
                     stats.connect_fail++;
-                } else {
-                    // 已连接后断开
+                }
+                if (cs.fd >= 0) {
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, cs.fd, nullptr);
+                    close(cs.fd);
+                    cs.fd = -1;
                 }
                 cs.phase = Phase::FAILED;
-                epoll_ctl(epfd, EPOLL_CTL_DEL, cs.fd, nullptr);
-                close(cs.fd);
-                cs.fd = -1;
-                active--;
-                continue;
-            }
-
-            Phase before = cs.phase;
-
-            switch (cs.phase) {
-            case Phase::CONNECTING:
-                handle_connect(epfd, cs, idx, stats);
-                // connect 成功后可能直接可写，尝试写
-                if (cs.phase == Phase::WRITING) {
+            } else {
+                switch (cs.phase) {
+                case Phase::CONNECTING:
+                    handle_connect(epfd, cs, idx, stats);
+                    if (cs.phase == Phase::WRITING) {
+                        handle_write(epfd, cs, idx, stats);
+                    }
+                    break;
+                case Phase::WRITING:
                     handle_write(epfd, cs, idx, stats);
+                    break;
+                case Phase::READING_HEADERS:
+                case Phase::READING_BODY:
+                    handle_read(epfd, cs, idx, serv_addr, stats);
+                    break;
+                default:
+                    break;
                 }
-                break;
-            case Phase::WRITING:
-                handle_write(epfd, cs, idx, stats);
-                break;
-            case Phase::READING:
-                handle_read(epfd, cs, idx, stats);
-                break;
-            default:
-                break;
             }
 
-            if (cs.phase == Phase::DONE || cs.phase == Phase::FAILED) {
-                if (before != Phase::FAILED && before != Phase::DONE) {
-                    active--;
-                }
+            // active 计数: 只在状态从非终态转入终态时减
+            bool was_terminal = (before == Phase::DONE || before == Phase::FAILED);
+            bool now_terminal = (cs.phase == Phase::DONE || cs.phase == Phase::FAILED);
+            if (now_terminal && !was_terminal) {
+                active--;
             }
         }
     }
 
-    // 清理未完成的连接
+    // 收尾
     for (auto &cs : conns) {
-        if (cs.fd >= 0) {
-            close(cs.fd);
-        }
-        // 收集延迟数据
+        if (cs.fd >= 0) close(cs.fd);
         stats.latencies_us.insert(stats.latencies_us.end(),
                                    cs.latencies_us.begin(),
                                    cs.latencies_us.end());
     }
-
     close(epfd);
 }
 
 // ==================== 统计输出 ====================
 
 static void print_stats(const std::vector<WorkerStats> &all_stats,
-                         double duration_sec, int total_conns)
+                         double duration_sec, int total_slots, int msgs_per_slot)
 {
-    int connected = 0, failed = 0, msgs = 0, verify_fail = 0;
+    int connected = 0, conn_fail = 0, ok = 0, verify_fail = 0;
     std::vector<double> all_lat;
-
     for (auto &s : all_stats) {
         connected += s.connected_ok;
-        failed += s.connect_fail;
-        msgs += s.messages_ok;
+        conn_fail += s.connect_fail;
+        ok += s.requests_ok;
         verify_fail += s.verify_fail;
         all_lat.insert(all_lat.end(), s.latencies_us.begin(), s.latencies_us.end());
     }
 
-    printf("\n============ C10K Stress Test Results ============\n");
-    printf("Connections:  %d attempted, %d connected, %d failed\n",
-           total_conns, connected, failed);
-    printf("Messages:     %d echoed OK, %d verify failures\n",
-           msgs, verify_fail);
+    int target = total_slots * msgs_per_slot;
+    printf("\n========== HTTP Stress Test Results ==========\n");
+    printf("Slots:        %d (%d msgs/slot, target = %d requests)\n",
+           total_slots, msgs_per_slot, target);
+    printf("Connections:  %d connect_ok, %d connect_fail (含重连)\n",
+           connected, conn_fail);
+    printf("Requests:     %d completed, %d non-200 responses\n",
+           ok, verify_fail);
+    int timeout_total = 0;
+    for (auto &s : all_stats) timeout_total += s.request_timeout;
+    if (timeout_total > 0) {
+        printf("Timeouts:     %d slots stuck > %.1fs (server bug 嫌疑)\n",
+               timeout_total, PER_REQ_TIMEOUT_SEC);
+    }
 
     if (!all_lat.empty()) {
         std::sort(all_lat.begin(), all_lat.end());
         double sum = std::accumulate(all_lat.begin(), all_lat.end(), 0.0);
         size_t n = all_lat.size();
-        printf("Latency (us): avg=%.0f, min=%.0f, max=%.0f, p50=%.0f, p99=%.0f\n",
+        printf("Latency (us): avg=%.0f  min=%.0f  p50=%.0f  p90=%.0f  p99=%.0f  max=%.0f\n",
                sum / n,
                all_lat.front(),
-               all_lat.back(),
                all_lat[n * 50 / 100],
-               all_lat[n * 99 / 100]);
+               all_lat[n * 90 / 100],
+               all_lat[n * 99 / 100],
+               all_lat.back());
     }
 
-    printf("Throughput:   %.0f msg/sec\n", msgs / duration_sec);
+    printf("Requests/sec: %.0f\n", ok / duration_sec);
     printf("Duration:     %.2f seconds\n", duration_sec);
-    printf("==================================================\n");
+    printf("==============================================\n");
 }
 
 // ==================== main ====================
 
 int main(int argc, char *argv[])
 {
-    int total_conns = 10000;
+    int total_slots = 10000;
     int msgs = 10;
     int threads = std::thread::hardware_concurrency();
     const char *server_ip = "127.0.0.1";
@@ -361,21 +512,21 @@ int main(int argc, char *argv[])
     const char *optstring = "c:m:t:s:p:";
     while ((o = getopt(argc, argv, optstring)) != -1) {
         switch (o) {
-        case 'c': total_conns = atoi(optarg); break;
+        case 'c': total_slots = atoi(optarg); break;
         case 'm': msgs = atoi(optarg); break;
         case 't': threads = atoi(optarg); break;
         case 's': server_ip = optarg; break;
         case 'p': port = atoi(optarg); break;
         default:
-            fprintf(stderr, "Usage: %s [-c conns] [-m msgs] [-t threads] [-s ip] [-p port]\n",
+            fprintf(stderr, "Usage: %s [-c slots] [-m msgs/slot] [-t threads] [-s ip] [-p port]\n",
                     argv[0]);
             return 1;
         }
     }
 
-    printf("C10K Stress Test: %d connections, %d msgs/conn, %d threads\n",
-           total_conns, msgs, threads);
-    printf("Target: %s:%d\n\n", server_ip, port);
+    printf("HTTP Stress Test: %d slots x %d msgs (short conn), %d threads\n",
+           total_slots, msgs, threads);
+    printf("Target: GET http://%s:%d/\n\n", server_ip, port);
 
     std::vector<WorkerStats> all_stats(threads);
     std::vector<std::thread> workers;
@@ -383,24 +534,17 @@ int main(int argc, char *argv[])
     auto start = std::chrono::steady_clock::now();
 
     for (int i = 0; i < threads; ++i) {
-        int conns_for_thread = total_conns / threads;
-        // 前几个线程多分一个，处理不能整除的情况
-        if (i < total_conns % threads) {
-            conns_for_thread++;
-        }
-        workers.emplace_back(worker_run, i, conns_for_thread, msgs,
+        int slots = total_slots / threads;
+        if (i < total_slots % threads) slots++;
+        workers.emplace_back(worker_run, i, slots, msgs,
                              server_ip, (uint16_t)port,
                              std::ref(all_stats[i]));
     }
-
-    for (auto &t : workers) {
-        t.join();
-    }
+    for (auto &t : workers) t.join();
 
     auto end = std::chrono::steady_clock::now();
     double duration = std::chrono::duration<double>(end - start).count();
 
-    print_stats(all_stats, duration, total_conns);
-
+    print_stats(all_stats, duration, total_slots, msgs);
     return 0;
 }
