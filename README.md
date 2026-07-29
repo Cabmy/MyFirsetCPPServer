@@ -1,111 +1,82 @@
 # MyFirstCPPServer
 
-基于主从 Reactor 多线程模式的高并发 HTTP 服务器，支持 MySQL 用户注册/登录 + Redis 缓存加速。
+基于主从 Reactor 多线程模型的高并发 HTTP 服务器：epoll ET + 线程池 + MySQL/Redis 连接池，
+支持用户注册/登录/会话鉴权，HTTP/1.1 keep-alive 长连接。
 
 ## 技术栈
 
-- 语言：C++14
-- I/O多路复用：Linux epoll（边缘触发 ET 模式 + 非阻塞 I/O）
-- 并发模型：主从 Reactor 多线程模式（1个主Reactor接收连接 + N个从Reactor处理IO，N = CPU核心数）
-- 线程池：基于 std::packaged_task + std::future，支持任意可调用对象和返回值获取
-- 数据库：MySQL 连接池（单例模式，mutex + condition_variable，RAII 自动归还）
-- 缓存：Redis 连接池（hiredis 同步客户端，用户缓存 + 会话Token管理）
-- 内存管理：std::unique_ptr 管理 Socket、Channel、Connection 等对象的生命周期（RAII）
-- 构建工具：CMake
+- **语言/构建**：C++14 + CMake
+- **网络**：Linux epoll 边缘触发(ET) + 非阻塞 I/O；主从 Reactor（1 主 Reactor accept + N 从 Reactor，N = CPU 核数）
+- **连接**：HTTP/1.1 keep-alive（持久输入缓冲 + Content-Length 分帧）；写路径 EPOLLOUT + 应用层写缓冲；`GET /` 静态页走 `sendfile` 零拷贝
+- **线程池**：`std::packaged_task` + `std::future`；DB 线程池隔离阻塞的 MySQL/Redis 调用
+- **存储**：MySQL 连接池（RAII 归还）+ Redis 连接池（用户缓存 + 会话 Token），连接池获取超时降级 503
+- **日志**：spdlog 异步日志（后台线程，业务线程不阻塞 IO）
+- **健壮性**：空闲连接超时、请求头/体大小限制、全局限流、优雅关闭（SIGINT/SIGTERM）
 
 ## 架构
 
 ```
-                    ┌─────────────────────────┐
-                    │     Main Reactor         │
-                    │  (EventLoop + Acceptor)  │
-                    │      accept 新连接        │
-                    └──────────┬──────────────┘
-                               │ fd % N 轮询分配
-              ┌────────────────┼────────────────┐
-              ▼                ▼                 ▼
-     ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-     │ Sub Reactor 0│ │ Sub Reactor 1│ │ Sub Reactor N│
-     │  EventLoop   │ │  EventLoop   │ │  EventLoop   │
-     │  (thPool_)   │ │  (thPool_)   │ │  (thPool_)   │
-     └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-            │                │                 │
-            │  GET 请求直接处理，POST 请求提交到 DB 线程池
-            │                │                 │
-            └────────────────┼─────────────────┘
-                             ▼
-                    ┌──────────────────┐
-                    │  DB ThreadPool   │
-                    │   (dbPool_, 4)   │
-                    ├──────────────────┤
-                    │  MySQL 连接池     │
-                    │  Redis 连接池     │
-                    └──────────────────┘
+        ┌──────────────────────────┐
+        │  Main Reactor            │  accept 新连接, fd % N 分发
+        │  (EventLoop + Acceptor)  │
+        └──────────┬───────────────┘
+     ┌─────────────┼─────────────┐
+     ▼             ▼             ▼
+ Sub Reactor 0  Sub Reactor 1  Sub Reactor N     (thPool_, 每线程一个 EventLoop)
+     │  GET 内联处理 / POST + /profile 提交 DB 线程池
+     └─────────────┼─────────────┘
+                   ▼
+        DB ThreadPool (dbPool_) → MySQL 连接池 + Redis 连接池
 ```
+
+核心组件：**Server**（调度器，持有 Reactor/线程池/连接表）、**EventLoop**（一个 Reactor 事件循环）、
+**Epoll**/**Channel**（epoll 封装 + fd 事件解耦）、**Acceptor**（监听/accept）、**Connection**（HTTP 解析与路由）、
+**ThreadPool**、**MysqlPool**/**RedisPool**（单例连接池）。所有可调参数集中在 `src/include/Config.h`。
 
 ## 编译运行
 
-### 依赖安装
-
 ```bash
-sudo apt install libmysqlclient-dev libhiredis-dev
-```
+# 1. 依赖
+sudo apt install libmysqlclient-dev libhiredis-dev libspdlog-dev
 
-### 数据库准备
-
-```sql
-CREATE DATABASE IF NOT EXISTS myserver;
+# 2. 数据库
+mysql -e "CREATE DATABASE IF NOT EXISTS myserver;
 USE myserver;
-CREATE TABLE users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    username VARCHAR(64) NOT NULL UNIQUE,
-    password VARCHAR(128) NOT NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE users(id INT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(64) NOT NULL UNIQUE, password VARCHAR(128) NOT NULL)
+  ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"
+
+# 3. 编译运行
+cd build && cmake .. && make
+./server        # 监听 127.0.0.1:8888
 ```
 
-数据库配置在 `src/MysqlPool.cpp`（默认 root/admin@127.0.0.1:3306），Redis 配置在 `src/RedisPool.cpp`（默认 127.0.0.1:6379）。
+配置集中在 `src/include/Config.h`。地址/凭证可用 `MYSERVER_*` 环境变量覆盖（无需重编译）：
+`MYSERVER_HOST/PORT`、`MYSERVER_DB_HOST/PORT/USER/PASSWD/NAME`、`MYSERVER_REDIS_HOST/PORT`、
+`MYSERVER_STATIC_DIR`、`MYSERVER_LOG_FILE`；连接限值（超时/大小/限流）为 Config.h 编译期常量。
 
-### 编译
-
-```bash
-cd build
-cmake ..
-make
-```
-
-### 运行
-
-```bash
-./server    # 启动HTTP服务器，监听 127.0.0.1:8888
-```
+> WSL NAT 提示：MySQL 在 Windows 宿主机时用 `MYSERVER_DB_HOST=$(ip route show default | awk '{print $3}')`；
+> Redis protected mode 拒绝 IPv4 回环时用 `MYSERVER_REDIS_HOST=::1`。
 
 ## HTTP 接口
 
-| 接口 | 方法 | 请求体 | 成功响应 | 错误响应 |
-|------|------|--------|----------|----------|
-| `/` | GET | — | 200 欢迎页HTML | — |
-| `/hello` | GET | — | 200 Hello HTML | — |
-| `/register` | POST | `{"username":"x","password":"y"}` | 200 `{"message":"register success"}` | 409 用户已存在 |
-| `/login` | POST | `{"username":"x","password":"y"}` | 200 `{"message":"login success","token":"..."}` | 401 密码错误/用户不存在 |
+> 默认 HTTP/1.1 keep-alive；带 `Connection: close` 或 HTTP/1.0 则单次响应后关闭。
 
-### 测试
+| 接口 | 方法 | 请求 | 成功 | 错误 |
+|------|------|------|------|------|
+| `/` | GET | — | 200 前端页（`static/index.html`，缺失回退内联页） | — |
+| `/register` | POST | `{"username","password"}` | 200 register success | 400 缺参/超长、409 已存在、500/503 |
+| `/login` | POST | `{"username","password"}` | 200 `{token}` | 400、401 认证失败、503 |
+| `/profile` | GET | 头 `Authorization: Bearer <token>` | 200 `{username}` | 401 token 无效、503 |
+| `/logout` | POST | 头 `Authorization: Bearer <token>` | 200 logout success | 401、503 |
+
+## 测试与压测
 
 ```bash
-# GET 路由
 curl http://127.0.0.1:8888/
-curl http://127.0.0.1:8888/hello
-
-# 注册
 curl -X POST -d '{"username":"test","password":"123"}' http://127.0.0.1:8888/register
-
-# 登录
 curl -X POST -d '{"username":"test","password":"123"}' http://127.0.0.1:8888/login
-```
 
-### 压力测试
-
-```bash
-./test_stress [-c conns] [-m msgs] [-t threads] [-s ip] [-p port]
-# 默认：10000连接，10条消息/连接，CPU核心数线程，127.0.0.1:8888
-# 注意：压测客户端发送的是echo模式数据，不是HTTP请求
+# 压测（业界标准工具 wrk: sudo apt install wrk）
+wrk -t8 -c200 -d15s --latency http://127.0.0.1:8888/
 ```

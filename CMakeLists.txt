@@ -9,11 +9,15 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(MYSQL REQUIRED mysqlclient)
 pkg_check_modules(HIREDIS REQUIRED hiredis)
 
+# 异步日志库 spdlog (sudo apt install libspdlog-dev)
+find_package(spdlog REQUIRED)
+
 # 收集 src/ 下所有源文件作为静态库
 file(GLOB LIB_SRC src/*.cpp)
 add_library(server_lib STATIC ${LIB_SRC})
 target_include_directories(server_lib PUBLIC src/include ${MYSQL_INCLUDE_DIRS} ${HIREDIS_INCLUDE_DIRS})
 target_compile_definitions(server_lib PUBLIC USE_REDIS=1)
+target_link_libraries(server_lib PUBLIC spdlog::spdlog)
 
 # 三个可执行目标
 add_executable(server test/server.cpp)
@@ -21,6 +25,3 @@ target_link_libraries(server server_lib pthread ${MYSQL_LIBRARIES} ${HIREDIS_LIB
 
 add_executable(client test/client.cpp)
 target_link_libraries(client server_lib pthread)
-
-add_executable(test_stress test/test.cpp)
-target_link_libraries(test_stress server_lib pthread)

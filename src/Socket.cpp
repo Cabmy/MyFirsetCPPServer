@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <netinet/tcp.h>
 
 Socket::Socket() : fd_(-1)
 {
@@ -41,6 +42,12 @@ void Socket::setnonblocking()
 {
     int flags = fcntl(fd_, F_GETFL);
     fcntl(fd_, F_SETFL, flags | O_NONBLOCK);
+}
+
+void Socket::setNoDelay()
+{
+    int on = 1;
+    setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 }
 
 int Socket::accept(InetAddress *addr)

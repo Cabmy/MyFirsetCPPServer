@@ -1,12 +1,10 @@
 #ifdef USE_REDIS
 
 #include "RedisPool.h"
+#include "Config.h"
+#include "Log.h"
 #include <stdio.h>
-
-// ====== Redis config (modify these for your environment) ======
-static const char *REDIS_HOST = "127.0.0.1";
-static const unsigned int REDIS_PORT = 6379;
-static const int REDIS_MAX_CONN = 8;
+#include <chrono>
 
 RedisPool &RedisPool::getInstance()
 {
@@ -15,35 +13,59 @@ RedisPool &RedisPool::getInstance()
 }
 
 RedisPool::RedisPool()
-    : maxConn_(REDIS_MAX_CONN), host_(REDIS_HOST), port_(REDIS_PORT)
+    : maxConn_(config::kRedisMaxConn), host_(config::redisHost()), port_(config::redisPort())
 {
     int created = 0;
     for (int i = 0; i < maxConn_; ++i)
     {
-        struct timeval timeout = {1, 500000}; // 1.5s
-        redisContext *conn = redisConnectWithTimeout(host_.c_str(), port_, timeout);
-        if (!conn || conn->err)
+        redisContext *conn = createConn();
+        if (conn)
         {
-            if (conn)
-            {
-                fprintf(stderr, "RedisPool: connect failed: %s\n", conn->errstr);
-                redisFree(conn);
-            }
-            continue;
+            pool_.push(conn);
+            ++created;
         }
-
-        pool_.push(conn);
-        ++created;
     }
 
     if (created == 0)
     {
-        fprintf(stderr, "RedisPool: WARNING - no connections created. "
-                        "Check Redis is running on %s:%u\n", host_.c_str(), port_);
+        LOG_WARN("RedisPool: no connections created; check Redis is running on %s:%u", host_.c_str(), port_);
     }
     else
     {
-        printf("RedisPool: initialized with %d connections\n", created);
+        LOG_INFO("RedisPool: initialized with %d connections", created);
+    }
+}
+
+// Open a single new Redis connection. Returns nullptr on failure.
+redisContext *RedisPool::createConn()
+{
+    struct timeval timeout = {config::kRedisConnectTimeoutMs / 1000,
+                              (config::kRedisConnectTimeoutMs % 1000) * 1000};
+    redisContext *conn = redisConnectWithTimeout(host_.c_str(), port_, timeout);
+    if (!conn || conn->err)
+    {
+        if (conn)
+        {
+            LOG_ERROR("RedisPool: connect failed: %s", conn->errstr);
+            redisFree(conn);
+        }
+        return nullptr;
+    }
+    return conn;
+}
+
+// A command returned NULL reply => the connection is broken and must not be
+// reused. Free it and try to open a replacement so the pool does not shrink.
+void RedisPool::discardBrokenConn(redisContext *conn)
+{
+    if (conn)
+        redisFree(conn);
+    redisContext *fresh = createConn();
+    if (fresh)
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        pool_.push(fresh);
+        cv_.notify_one();
     }
 }
 
@@ -60,8 +82,12 @@ RedisPool::~RedisPool()
 redisContext *RedisPool::getConn()
 {
     std::unique_lock<std::mutex> lock(mtx_);
-    cv_.wait(lock, [this]
-             { return !pool_.empty(); });
+    if (!cv_.wait_for(lock, std::chrono::seconds(config::kPoolAcquireTimeoutSec), [this]
+                       { return !pool_.empty(); }))
+    {
+        LOG_ERROR("RedisPool: timeout waiting for connection");
+        return nullptr;
+    }
 
     redisContext *conn = pool_.front();
     pool_.pop();
@@ -78,38 +104,81 @@ void RedisPool::releaseConn(redisContext *conn)
     cv_.notify_one();
 }
 
-std::string RedisPool::get(const std::string &key)
+std::string RedisPool::get(const std::string &key, RedisStatus *status)
 {
+    auto setStatus = [status](RedisStatus s)
+    { if (status) *status = s; };
+
     redisContext *conn = getConn();
-    redisReply *reply = (redisReply *)redisCommand(conn, "GET %s", key.c_str());
-    std::string result;
-    if (reply && reply->type == REDIS_REPLY_STRING)
+    if (!conn)
     {
-        result = std::string(reply->str, reply->len);
+        setStatus(RedisStatus::Error);
+        return "";
     }
-    if (reply)
-        freeReplyObject(reply);
+
+    redisReply *reply = (redisReply *)redisCommand(conn, "GET %s", key.c_str());
+    if (!reply)
+    {
+        // Broken connection: do not return it to the pool
+        discardBrokenConn(conn);
+        setStatus(RedisStatus::Error);
+        return "";
+    }
+
+    std::string result;
+    RedisStatus st;
+    if (reply->type == REDIS_REPLY_STRING)
+    {
+        result.assign(reply->str, reply->len);
+        st = RedisStatus::Ok;
+    }
+    else
+    {
+        st = RedisStatus::NotFound; // nil or unexpected type
+    }
+    freeReplyObject(reply);
     releaseConn(conn);
+    setStatus(st);
     return result;
 }
 
-void RedisPool::setex(const std::string &key, int ttl, const std::string &value)
+bool RedisPool::setex(const std::string &key, int ttl, const std::string &value)
 {
     redisContext *conn = getConn();
+    if (!conn)
+        return false;
+
     redisReply *reply = (redisReply *)redisCommand(conn, "SETEX %s %d %s",
                                                    key.c_str(), ttl, value.c_str());
-    if (reply)
-        freeReplyObject(reply);
+    if (!reply)
+    {
+        discardBrokenConn(conn);
+        return false;
+    }
+    bool ok = (reply->type != REDIS_REPLY_ERROR);
+    freeReplyObject(reply);
     releaseConn(conn);
+    return ok;
 }
 
-void RedisPool::del(const std::string &key)
+RedisStatus RedisPool::del(const std::string &key)
 {
     redisContext *conn = getConn();
+    if (!conn)
+        return RedisStatus::Error;
+
     redisReply *reply = (redisReply *)redisCommand(conn, "DEL %s", key.c_str());
-    if (reply)
-        freeReplyObject(reply);
+    if (!reply)
+    {
+        discardBrokenConn(conn);
+        return RedisStatus::Error;
+    }
+    RedisStatus st = (reply->type == REDIS_REPLY_INTEGER && reply->integer > 0)
+                         ? RedisStatus::Ok
+                         : RedisStatus::NotFound;
+    freeReplyObject(reply);
     releaseConn(conn);
+    return st;
 }
 
 #endif // USE_REDIS

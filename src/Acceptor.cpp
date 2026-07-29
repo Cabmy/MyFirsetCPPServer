@@ -2,13 +2,14 @@
 #include "Socket.h"
 #include "Channel.h"
 #include "InetAddress.h"
+#include "Config.h"
 #include <stdio.h>
 #include <errno.h>
 
 Acceptor::Acceptor(EventLoop *loop) : loop_(loop)
 {
     sock_ = std::make_unique<Socket>();
-    InetAddress addr("127.0.0.1", 8888);
+    InetAddress addr(config::serverHost().c_str(), config::serverPort());
     sock_->bind(&addr);
     sock_->listen();
     sock_->setnonblocking();
@@ -35,6 +36,7 @@ void Acceptor::acceptConnection()
         }
         auto clnt_sock = std::make_unique<Socket>(clnt_fd);
         clnt_sock->setnonblocking();
+        clnt_sock->setNoDelay();
         newConnectionCallback_(std::move(clnt_sock));
     }
 }

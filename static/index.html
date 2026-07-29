@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MyFirstCPPServer 演示台</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #1a2a44 0%, #0f1c30 100%);
+            color: #e8edf4;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px 16px;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 4px;
+        }
+
+        .sub {
+            color: #8fa3bf;
+            font-size: 13px;
+            margin-bottom: 28px;
+        }
+
+        .card {
+            width: 100%;
+            max-width: 400px;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 14px;
+            padding: 26px;
+            backdrop-filter: blur(8px);
+        }
+
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+
+        .tabs button {
+            flex: 1;
+            padding: 9px 0;
+            border: none;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #b8c6da;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all .15s;
+        }
+
+        .tabs button.active {
+            background: #3b82f6;
+            color: #fff;
+        }
+
+        label {
+            display: block;
+            font-size: 13px;
+            color: #a8b8cf;
+            margin: 12px 0 5px;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: rgba(0, 0, 0, 0.25);
+            color: #fff;
+            font-size: 14px;
+            outline: none;
+        }
+
+        input:focus {
+            border-color: #3b82f6;
+        }
+
+        .btn {
+            width: 100%;
+            margin-top: 18px;
+            padding: 11px 0;
+            border: none;
+            border-radius: 8px;
+            font-size: 15px;
+            cursor: pointer;
+            background: #3b82f6;
+            color: #fff;
+            transition: background .15s;
+        }
+
+        .btn:hover {
+            background: #2f6fd6;
+        }
+
+        .btn.danger {
+            background: #dc4b4b;
+        }
+
+        .btn.danger:hover {
+            background: #c23c3c;
+        }
+
+        .msg {
+            margin-top: 14px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            display: none;
+            word-break: break-all;
+        }
+
+        .msg.ok {
+            display: block;
+            background: rgba(34, 197, 94, 0.15);
+            color: #6ee7a0;
+        }
+
+        .msg.err {
+            display: block;
+            background: rgba(220, 75, 75, 0.15);
+            color: #f0938f;
+        }
+
+        .profile {
+            text-align: center;
+        }
+
+        .avatar {
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: #3b82f6;
+            color: #fff;
+            font-size: 28px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 4px auto 14px;
+        }
+
+        .uname {
+            font-size: 19px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .token-line {
+            font-size: 11px;
+            color: #7e91ab;
+            margin-top: 10px;
+            word-break: break-all;
+            background: rgba(0, 0, 0, 0.25);
+            padding: 8px;
+            border-radius: 6px;
+            font-family: monospace;
+        }
+
+        .api-log {
+            width: 100%;
+            max-width: 400px;
+            margin-top: 18px;
+            font-family: monospace;
+            font-size: 12px;
+            color: #7e91ab;
+        }
+
+        .api-log div {
+            padding: 3px 0;
+            border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+        }
+
+        .api-log .code-2xx {
+            color: #6ee7a0;
+        }
+
+        .api-log .code-4xx {
+            color: #f5c76e;
+        }
+
+        .api-log .code-5xx {
+            color: #f0938f;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>MyFirstCPPServer</h1>
+    <div class="sub">主从 Reactor · epoll ET · MySQL 连接池 · Redis 会话</div>
+
+    <!-- 未登录：注册 / 登录 -->
+    <div class="card" id="authCard">
+        <div class="tabs">
+            <button id="tabLogin" class="active" onclick="switchTab('login')">登录</button>
+            <button id="tabReg" onclick="switchTab('register')">注册</button>
+        </div>
+        <label>用户名（≤64 字符）</label>
+        <input id="username" maxlength="64" placeholder="username">
+        <label>密码（≤128 字符）</label>
+        <input id="password" type="password" maxlength="128" placeholder="password">
+        <button class="btn" id="submitBtn" onclick="submitAuth()">登 录</button>
+        <div class="msg" id="authMsg"></div>
+    </div>
+
+    <!-- 已登录：个人资料 -->
+    <div class="card profile hidden" id="profileCard">
+        <div class="avatar" id="avatar">?</div>
+        <div class="uname" id="profileName">-</div>
+        <div class="sub">会话由 Redis <code>session:</code> 键验证（TTL 1h）</div>
+        <div class="token-line" id="tokenLine"></div>
+        <button class="btn" onclick="loadProfile()">刷新资料（GET /profile）</button>
+        <button class="btn danger" onclick="logout()">登出（POST /logout）</button>
+        <div class="msg" id="profileMsg"></div>
+    </div>
+
+    <div class="api-log" id="apiLog"></div>
+
+    <script>
+        let mode = 'login';
+
+        function switchTab(m) {
+            mode = m;
+            document.getElementById('tabLogin').classList.toggle('active', m === 'login');
+            document.getElementById('tabReg').classList.toggle('active', m === 'register');
+            document.getElementById('submitBtn').textContent = m === 'login' ? '登 录' : '注 册';
+            showMsg('authMsg', '', '');
+        }
+
+        function showMsg(id, text, cls) {
+            const el = document.getElementById(id);
+            el.textContent = text;
+            el.className = 'msg' + (cls ? ' ' + cls : '');
+        }
+
+        function logApi(method, path, status) {
+            const log = document.getElementById('apiLog');
+            const cls = status < 300 ? 'code-2xx' : status < 500 ? 'code-4xx' : 'code-5xx';
+            const row = document.createElement('div');
+            row.innerHTML = `${new Date().toLocaleTimeString()} ${method} ${path} → <span class="${cls}">${status}</span>`;
+            log.prepend(row);
+            while (log.children.length > 8) log.removeChild(log.lastChild);
+        }
+
+        async function api(method, path, body, token) {
+            const headers = {};
+            if (body) headers['Content-Type'] = 'application/json';
+            if (token) headers['Authorization'] = 'Bearer ' + token;
+            const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+            logApi(method, path, res.status);
+            return { status: res.status, data: await res.json() };
+        }
+
+        async function submitAuth() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value;
+            if (!username || !password) { showMsg('authMsg', '请输入用户名和密码', 'err'); return; }
+
+            try {
+                if (mode === 'register') {
+                    const r = await api('POST', '/register', { username, password });
+                    if (r.status === 200) showMsg('authMsg', '注册成功，切到登录页试试吧', 'ok');
+                    else showMsg('authMsg', r.data.error || '注册失败', 'err');
+                    return;
+                }
+                const r = await api('POST', '/login', { username, password });
+                if (r.status === 200) {
+                    localStorage.setItem('token', r.data.token);
+                    showMsg('authMsg', '', '');
+                    enterProfile();
+                } else {
+                    showMsg('authMsg', r.data.error || '登录失败', 'err');
+                }
+            } catch (e) {
+                showMsg('authMsg', '请求失败：' + e.message, 'err');
+            }
+        }
+
+        async function loadProfile() {
+            const token = localStorage.getItem('token');
+            if (!token) { exitProfile(); return; }
+            try {
+                const r = await api('GET', '/profile', null, token);
+                if (r.status === 200) {
+                    const name = r.data.username;
+                    document.getElementById('profileName').textContent = name;
+                    document.getElementById('avatar').textContent = name.charAt(0).toUpperCase();
+                    document.getElementById('tokenLine').textContent = 'token: ' + token;
+                    showMsg('profileMsg', '', '');
+                } else {
+                    localStorage.removeItem('token');
+                    exitProfile();
+                    showMsg('authMsg', '会话已过期，请重新登录', 'err');
+                }
+            } catch (e) {
+                showMsg('profileMsg', '请求失败：' + e.message, 'err');
+            }
+        }
+
+        async function logout() {
+            const token = localStorage.getItem('token');
+            try {
+                if (token) await api('POST', '/logout', null, token);
+            } catch (e) { /* session cleanup is best-effort on the client side */ }
+            localStorage.removeItem('token');
+            exitProfile();
+            showMsg('authMsg', '已登出', 'ok');
+        }
+
+        function enterProfile() {
+            document.getElementById('authCard').classList.add('hidden');
+            document.getElementById('profileCard').classList.remove('hidden');
+            loadProfile();
+        }
+
+        function exitProfile() {
+            document.getElementById('profileCard').classList.add('hidden');
+            document.getElementById('authCard').classList.remove('hidden');
+        }
+
+        // 页面加载：有 token 就直接尝试进入资料页
+        if (localStorage.getItem('token')) enterProfile();
+    </script>
+</body>
+
+</html>

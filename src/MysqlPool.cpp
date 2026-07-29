@@ -1,14 +1,9 @@
 #include "MysqlPool.h"
+#include "Config.h"
+#include "Log.h"
 #include <stdio.h>
 #include <stdexcept>
-
-// ====== Database config (modify these for your environment) ======
-static const char *DB_HOST = "127.0.0.1";
-static const char *DB_USER = "root";
-static const char *DB_PASSWD = "admin";
-static const char *DB_NAME = "myserver";
-static const unsigned int DB_PORT = 3306;
-static const int DB_MAX_CONN = 8;
+#include <chrono>
 
 MysqlPool &MysqlPool::getInstance()
 {
@@ -17,26 +12,27 @@ MysqlPool &MysqlPool::getInstance()
 }
 
 MysqlPool::MysqlPool()
-    : maxConn_(DB_MAX_CONN), freeConn_(0),
-      host_(DB_HOST), user_(DB_USER), passwd_(DB_PASSWD),
-      dbName_(DB_NAME), port_(DB_PORT)
+    : maxConn_(config::kDbMaxConn), freeConn_(0),
+      host_(config::dbHost()), user_(config::dbUser()), passwd_(config::dbPasswd()),
+      dbName_(config::dbName()), port_(config::dbPort())
 {
     for (int i = 0; i < maxConn_; ++i)
     {
         MYSQL *conn = mysql_init(nullptr);
         if (!conn)
         {
-            fprintf(stderr, "MysqlPool: mysql_init failed\n");
+            LOG_ERROR("MysqlPool: mysql_init failed");
             continue;
         }
 
-        conn = mysql_real_connect(conn,
-                                  host_.c_str(), user_.c_str(), passwd_.c_str(),
-                                  dbName_.c_str(), port_, nullptr, 0);
-        if (!conn)
+        // Keep the init handle: on failure mysql_real_connect returns NULL
+        // and the error must be read (and the handle freed) via the original
+        if (!mysql_real_connect(conn,
+                                host_.c_str(), user_.c_str(), passwd_.c_str(),
+                                dbName_.c_str(), port_, nullptr, 0))
         {
-            fprintf(stderr, "MysqlPool: mysql_real_connect failed: %s\n",
-                    mysql_error(conn));
+            LOG_ERROR("MysqlPool: mysql_real_connect failed: %s", mysql_error(conn));
+            mysql_close(conn);
             continue;
         }
 
@@ -49,12 +45,11 @@ MysqlPool::MysqlPool()
 
     if (freeConn_ == 0)
     {
-        fprintf(stderr, "MysqlPool: WARNING - no connections created. "
-                        "Check MySQL is running and credentials are correct.\n");
+        LOG_WARN("MysqlPool: no connections created; check MySQL is running and credentials");
     }
     else
     {
-        printf("MysqlPool: initialized with %d connections\n", freeConn_);
+        LOG_INFO("MysqlPool: initialized with %d connections", freeConn_);
     }
 }
 
@@ -71,8 +66,12 @@ MysqlPool::~MysqlPool()
 MYSQL *MysqlPool::getConn()
 {
     std::unique_lock<std::mutex> lock(mtx_);
-    cv_.wait(lock, [this]
-             { return !pool_.empty(); });
+    if (!cv_.wait_for(lock, std::chrono::seconds(config::kPoolAcquireTimeoutSec), [this]
+                       { return !pool_.empty(); }))
+    {
+        LOG_ERROR("MysqlPool: timeout waiting for connection");
+        return nullptr;
+    }
 
     MYSQL *conn = pool_.front();
     pool_.pop();

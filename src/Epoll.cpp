@@ -3,6 +3,7 @@
 #include <errno.h>
 #include "Epoll.h"
 #include "util.h"
+#include "Log.h"
 #include "Channel.h"
 
 #define MAX_EVENTS_ 4096
@@ -38,7 +39,10 @@ std::vector<Channel *> Epoll::activeChannels(int timeout)
     int nfds = epoll_wait(epfd_, events_.data(), MAX_EVENTS_, timeout);
     if (nfds == -1) {
         if (errno == EINTR) return {};
-        errif(true, "epoll wait error");
+        // A transient epoll_wait error must NOT kill the whole server; log and
+        // return an empty set so the event loop keeps running.
+        LOG_ERROR("epoll_wait error: %s", strerror(errno));
+        return {};
     }
 
     for (int i = 0; i < nfds; ++i)
@@ -61,11 +65,21 @@ void Epoll::updateChannel(Channel *channel)
     ev.events = channel->getEvents();
     if (!channel->getInEpoll())
     {
-        errif(epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev) == -1, "epoll add error");
+        if (epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev) == -1)
+        {
+            // Under a short-connection storm an fd number can be recycled
+            // while a prior connection's registration lingers -> EEXIST.
+            // Take the fd over with MOD instead of aborting the whole server.
+            if (errno == EEXIST)
+                epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev);
+            else
+                LOG_ERROR("epoll ADD fd=%d failed: %s", fd, strerror(errno));
+        }
         channel->setInEpoll();
     }
     else
     {
-        errif(epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev) == -1, "epoll add error");
+        if (epoll_ctl(epfd_, EPOLL_CTL_MOD, fd, &ev) == -1)
+            LOG_ERROR("epoll MOD fd=%d failed: %s", fd, strerror(errno));
     }
 }

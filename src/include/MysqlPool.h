@@ -37,7 +37,11 @@ class MysqlGuard
 {
 public:
     MysqlGuard() : conn_(MysqlPool::getInstance().getConn()) {}
-    ~MysqlGuard() { MysqlPool::getInstance().releaseConn(conn_); }
+    ~MysqlGuard()
+    {
+        if (conn_)
+            MysqlPool::getInstance().releaseConn(conn_);
+    }
     MYSQL *get() { return conn_; }
     MysqlGuard(const MysqlGuard &) = delete;
     MysqlGuard &operator=(const MysqlGuard &) = delete;

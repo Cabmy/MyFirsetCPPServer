@@ -15,14 +15,17 @@ EventLoop::~EventLoop()
 
 void EventLoop::loop()
 {
-    while (!quit_)
+    // 1s poll timeout so the loop periodically wakes to run housekeeping
+    // (idle-connection sweep / shutdown check) and can observe quit_.
+    while (!quit_.load())
     {
-        std::vector<Channel *> chs;
-        chs = ep_->activeChannels();
+        std::vector<Channel *> chs = ep_->activeChannels(1000);
         for (Channel *ch : chs)
         {
             ch->handleEvent();
         }
+        if (loopCallback_)
+            loopCallback_();
     }
 }
 

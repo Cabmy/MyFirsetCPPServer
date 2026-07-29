@@ -6,12 +6,15 @@
 #include "Connection.h"
 #include "ThreadPool.h"
 #include "EventLoop.h"
+#include "Config.h"
 #include <functional>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
 #include <thread>
+#include <ctime>
+#include <sys/socket.h>
 
 Server::Server(EventLoop *lp) : mainReactor_(lp), acceptor_(nullptr)
 {
@@ -33,7 +36,7 @@ Server::Server(EventLoop *lp) : mainReactor_(lp), acceptor_(nullptr)
     }
 
     // DB thread pool for blocking MySQL/Redis operations
-    dbPool_ = std::make_unique<ThreadPool>(4);
+    dbPool_ = std::make_unique<ThreadPool>(config::kDbThreads);
 }
 
 Server::~Server()
@@ -47,13 +50,40 @@ void Server::newConnection(std::unique_ptr<Socket> sock)
         return;
     }
     int fd = sock->getFd();
-    int random = sock->getFd() % subReactors_.size();
-    auto conn = std::make_unique<Connection>(subReactors_[random].get(), std::move(sock), dbPool_.get());
+    int random = fd % subReactors_.size();
+    // Pass the delete callback into the ctor so it is set before the channel
+    // is registered to epoll (avoids the early-event null-callback race).
     std::function<void(int)> cb = std::bind(&Server::deleteConnection, this, std::placeholders::_1);
-    conn->setDeleteConnectionCallback(cb);
+    auto conn = std::make_unique<Connection>(subReactors_[random].get(), std::move(sock), dbPool_.get(), cb);
     {
         std::lock_guard<std::mutex> lock(connMtx_);
         connections_[fd] = std::move(conn);
+    }
+}
+
+void Server::stop()
+{
+    // Set quit on every reactor; each loop observes it within one poll timeout.
+    mainReactor_->quit();
+    for (auto &r : subReactors_)
+        r->quit();
+}
+
+void Server::sweepIdle()
+{
+    int timeout = config::kIdleTimeoutSec;
+    if (timeout <= 0)
+        return;
+    long now = (long)time(nullptr);
+    std::lock_guard<std::mutex> lock(connMtx_);
+    for (auto &kv : connections_)
+    {
+        if (now - kv.second->lastActiveSec() > timeout)
+        {
+            // Don't delete here (wrong thread): half-close so the owning
+            // sub-reactor sees EOF and runs deleteConnection safely.
+            ::shutdown(kv.first, SHUT_RDWR);
+        }
     }
 }
 

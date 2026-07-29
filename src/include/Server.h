@@ -27,4 +27,7 @@ public:
 
     void newConnection(std::unique_ptr<Socket>);
     void deleteConnection(int);
+
+    void stop();      // quit main + all sub reactors (graceful shutdown)
+    void sweepIdle(); // shutdown() connections idle beyond the configured timeout
 };
