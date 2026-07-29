@@ -57,26 +57,3 @@ cd build && cmake .. && make
 
 > WSL NAT 提示：MySQL 在 Windows 宿主机时用 `MYSERVER_DB_HOST=$(ip route show default | awk '{print $3}')`；
 > Redis protected mode 拒绝 IPv4 回环时用 `MYSERVER_REDIS_HOST=::1`。
-
-## HTTP 接口
-
-> 默认 HTTP/1.1 keep-alive；带 `Connection: close` 或 HTTP/1.0 则单次响应后关闭。
-
-| 接口 | 方法 | 请求 | 成功 | 错误 |
-|------|------|------|------|------|
-| `/` | GET | — | 200 前端页（`static/index.html`，缺失回退内联页） | — |
-| `/register` | POST | `{"username","password"}` | 200 register success | 400 缺参/超长、409 已存在、500/503 |
-| `/login` | POST | `{"username","password"}` | 200 `{token}` | 400、401 认证失败、503 |
-| `/profile` | GET | 头 `Authorization: Bearer <token>` | 200 `{username}` | 401 token 无效、503 |
-| `/logout` | POST | 头 `Authorization: Bearer <token>` | 200 logout success | 401、503 |
-
-## 测试与压测
-
-```bash
-curl http://127.0.0.1:8888/
-curl -X POST -d '{"username":"test","password":"123"}' http://127.0.0.1:8888/register
-curl -X POST -d '{"username":"test","password":"123"}' http://127.0.0.1:8888/login
-
-# 压测（业界标准工具 wrk: sudo apt install wrk）
-wrk -t8 -c200 -d15s --latency http://127.0.0.1:8888/
-```
