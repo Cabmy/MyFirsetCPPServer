@@ -57,3 +57,14 @@ cd build && cmake .. && make
 
 > WSL NAT 提示：MySQL 在 Windows 宿主机时用 `MYSERVER_DB_HOST=$(ip route show default | awk '{print $3}')`；
 > Redis protected mode 拒绝 IPv4 回环时用 `MYSERVER_REDIS_HOST=::1`。
+
+## 访问
+
+启动后用浏览器打开 **http://127.0.0.1:8888/**，前端页面提供**注册 / 登录 / 查看资料 / 登出**的完整交互（含实时请求状态展示）。须从 `build/` 目录启动 `./server`，以便默认静态目录 `../static` 生效。
+
+## 压测
+
+```bash
+sudo apt install wrk
+wrk -t8 -c200 -d15s --latency http://127.0.0.1:8888/
+```
