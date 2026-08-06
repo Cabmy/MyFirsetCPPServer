@@ -78,12 +78,6 @@ void Channel::setInEpoll()
     inEpoll_ = true;
 }
 
-void Channel::useET()
-{
-    events_ |= EPOLLET;
-    loop_->updateChannel(this);
-}
-
 void Channel::setRevents(uint32_t ev)
 {
     revent_ = ev;

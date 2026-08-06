@@ -1,7 +1,6 @@
 #include "Connection.h"
 #include "Socket.h"
 #include "Channel.h"
-#include "Buffer.h"
 #include "ThreadPool.h"
 #include "MysqlPool.h"
 #include "Config.h"
@@ -15,8 +14,6 @@
 #include <sys/stat.h>
 #include <sys/sendfile.h>
 #include <string>
-#include <sstream>
-#include <fstream>
 #include <cstdlib>
 #include <ctime>
 #include <cctype>
@@ -90,21 +87,19 @@ std::string Connection::getJsonValue(const std::string &json, const std::string 
     return json.substr(pos, end - pos);
 }
 
-std::string Connection::parseBearerToken(const std::string &request)
+// Case-insensitive header lookup within a header block: returns the raw value
+// after the first "name:" line, or "" if absent. Field names are
+// case-insensitive (RFC 9110); trailing whitespace before the colon is tolerated.
+static std::string findHeader(const std::string &headers, const std::string &lowerName)
 {
-    // Header field names are case-insensitive (RFC 9110); scan line by line
-    // within the header section only, and normalize the token (trim + cap).
-    size_t headerEnd = request.find("\r\n\r\n");
-    std::string headers = (headerEnd == std::string::npos) ? request : request.substr(0, headerEnd);
-
-    size_t lineStart = 0;
-    while (lineStart < headers.size())
+    size_t p = 0;
+    while (p < headers.size())
     {
-        size_t lineEnd = headers.find("\r\n", lineStart);
-        if (lineEnd == std::string::npos)
-            lineEnd = headers.size();
-        std::string line = headers.substr(lineStart, lineEnd - lineStart);
-        lineStart = lineEnd + 2;
+        size_t e = headers.find("\r\n", p);
+        if (e == std::string::npos)
+            e = headers.size();
+        std::string line = headers.substr(p, e - p);
+        p = e + 2;
 
         size_t colon = line.find(':');
         if (colon == std::string::npos)
@@ -112,35 +107,44 @@ std::string Connection::parseBearerToken(const std::string &request)
         std::string name = line.substr(0, colon);
         for (char &c : name)
             c = (char)std::tolower((unsigned char)c);
-        if (name != "authorization")
-            continue;
-
-        std::string value = line.substr(colon + 1);
-        size_t b = value.find_first_not_of(" \t");
-        if (b == std::string::npos)
-            return "";
-        value = value.substr(b);
-
-        const std::string scheme = "bearer ";
-        if (value.size() < scheme.size())
-            return "";
-        std::string prefix = value.substr(0, scheme.size());
-        for (char &c : prefix)
-            c = (char)std::tolower((unsigned char)c);
-        if (prefix != scheme)
-            return "";
-
-        std::string token = value.substr(scheme.size());
-        size_t e = token.find_last_not_of(" \t");
-        if (e == std::string::npos)
-            return "";
-        token = token.substr(0, e + 1);
-        // Cap length so a malicious header cannot build a huge Redis key
-        if (token.size() > (size_t)config::kTokenLen * 2)
-            return "";
-        return token;
+        while (!name.empty() && (name.back() == ' ' || name.back() == '\t'))
+            name.pop_back();
+        if (name == lowerName)
+            return line.substr(colon + 1);
     }
     return "";
+}
+
+std::string Connection::parseBearerToken(const std::string &request)
+{
+    // Scan the header section only, and normalize the token (trim + cap).
+    size_t headerEnd = request.find("\r\n\r\n");
+    std::string headers = (headerEnd == std::string::npos) ? request : request.substr(0, headerEnd);
+
+    std::string value = findHeader(headers, "authorization");
+    size_t b = value.find_first_not_of(" \t");
+    if (b == std::string::npos)
+        return "";
+    value = value.substr(b);
+
+    const std::string scheme = "bearer ";
+    if (value.size() < scheme.size())
+        return "";
+    std::string prefix = value.substr(0, scheme.size());
+    for (char &c : prefix)
+        c = (char)std::tolower((unsigned char)c);
+    if (prefix != scheme)
+        return "";
+
+    std::string token = value.substr(scheme.size());
+    size_t e = token.find_last_not_of(" \t");
+    if (e == std::string::npos)
+        return "";
+    token = token.substr(0, e + 1);
+    // Cap length so a malicious header cannot build a huge Redis key
+    if (token.size() > (size_t)config::kTokenLen * 2)
+        return "";
+    return token;
 }
 
 // Escape a string for safe inclusion inside a JSON string literal.
@@ -215,44 +219,29 @@ std::string Connection::getResponse(const std::string &url)
     }
 }
 
+// Explicit status -> reason phrase mapping; add new codes here (repo rule).
+static const char *statusText(int statusCode)
+{
+    switch (statusCode)
+    {
+    case 200: return "OK";
+    case 400: return "Bad Request";
+    case 401: return "Unauthorized";
+    case 409: return "Conflict";
+    case 413: return "Payload Too Large";
+    case 429: return "Too Many Requests";
+    case 500: return "Internal Server Error";
+    case 503: return "Service Unavailable";
+    default: return "Not Found";
+    }
+}
+
 std::string Connection::buildHttpResponse(int statusCode, const std::string &contentType,
                                           const std::string &body, bool keepAlive)
 {
-    std::string statusText;
-    switch (statusCode)
-    {
-    case 200:
-        statusText = "OK";
-        break;
-    case 400:
-        statusText = "Bad Request";
-        break;
-    case 401:
-        statusText = "Unauthorized";
-        break;
-    case 409:
-        statusText = "Conflict";
-        break;
-    case 413:
-        statusText = "Payload Too Large";
-        break;
-    case 429:
-        statusText = "Too Many Requests";
-        break;
-    case 500:
-        statusText = "Internal Server Error";
-        break;
-    case 503:
-        statusText = "Service Unavailable";
-        break;
-    default:
-        statusText = "Not Found";
-        break;
-    }
-
     // Content-Length is always present, so the client can frame the response
     // and reuse the connection when keep-alive is negotiated.
-    return "HTTP/1.1 " + std::to_string(statusCode) + " " + statusText + "\r\n"
+    return "HTTP/1.1 " + std::to_string(statusCode) + " " + statusText(statusCode) + "\r\n"
            "Content-Type: " + contentType + "\r\n"
            "Content-Length: " + std::to_string(body.size()) + "\r\n"
            "Connection: " + (keepAlive ? "keep-alive" : "close") + "\r\n\r\n" + body;
@@ -288,6 +277,51 @@ void Connection::sendHttpResponse(int fd, int statusCode, const std::string &con
         {
             break; // write error, fd may be closed
         }
+    }
+}
+
+void Connection::sendJson(int fd, int statusCode, const std::string &body, bool keepAlive)
+{
+    sendHttpResponse(fd, statusCode, "application/json", body, keepAlive);
+}
+
+// Reject missing or over-long credentials (shared by /register and /login).
+// Length limits size the mysql_real_escape_string buffers (len*2+1):
+// username <= 64 -> esc_user[129], password <= 128 -> esc_pass[257].
+bool Connection::checkCredentials(int fd, bool keepAlive, const std::string &username,
+                                  const std::string &password)
+{
+    if (username.empty() || password.empty())
+    {
+        sendJson(fd, 400, "{\"error\":\"missing username or password\"}", keepAlive);
+        return false;
+    }
+    if (username.size() > config::kMaxUsernameLen || password.size() > config::kMaxPasswordLen)
+    {
+        sendJson(fd, 400, "{\"error\":\"username or password too long\"}", keepAlive);
+        return false;
+    }
+    return true;
+}
+
+// Uniform exception guard for DB-pool task bodies: a throw must never kill a
+// worker thread silently -- log it and answer 500.
+void Connection::runDbTask(const char *tag, int fd, bool keepAlive,
+                           const std::function<void()> &work)
+{
+    try
+    {
+        work();
+    }
+    catch (const std::exception &e)
+    {
+        LOG_ERROR("[%s] exception: %s", tag, e.what());
+        sendJson(fd, 500, "{\"error\":\"internal error\"}", keepAlive);
+    }
+    catch (...)
+    {
+        LOG_ERROR("[%s] unknown exception", tag);
+        sendJson(fd, 500, "{\"error\":\"internal error\"}", keepAlive);
     }
 }
 
@@ -446,31 +480,18 @@ void Connection::handleRegister(const std::string &request, int fd, bool keepAli
     std::string body = parseBody(request);
     std::string username = getJsonValue(body, "username");
     std::string password = getJsonValue(body, "password");
-
-    if (username.empty() || password.empty())
-    {
-        sendHttpResponse(fd, 400, "application/json", "{\"error\":\"missing username or password\"}", keepAlive);
+    if (!checkCredentials(fd, keepAlive, username, password))
         return;
-    }
-
-    // Enforce length limits: escape buffers below hold at most len*2+1 bytes
-    // (username <= 64 -> esc_user[129], password <= 128 -> esc_pass[257])
-    if (username.size() > config::kMaxUsernameLen || password.size() > config::kMaxPasswordLen)
-    {
-        sendHttpResponse(fd, 400, "application/json", "{\"error\":\"username or password too long\"}", keepAlive);
-        return;
-    }
 
     // Submit blocking DB work to the DB thread pool
     dbPool_->add([fd, keepAlive, username, password]()
-                 {
-        try
+                 { runDbTask("Register", fd, keepAlive, [&]()
         {
             MysqlGuard guard;
             MYSQL *conn = guard.get();
             if (!conn)
             {
-                sendHttpResponse(fd, 503, "application/json", "{\"error\":\"service unavailable\"}", keepAlive);
+                sendJson(fd, 503, "{\"error\":\"service unavailable\"}", keepAlive);
                 return;
             }
 
@@ -483,7 +504,7 @@ void Connection::handleRegister(const std::string &request, int fd, bool keepAli
             std::string query = "SELECT 1 FROM users WHERE username='" + std::string(esc_user) + "' LIMIT 1";
             if (mysql_query(conn, query.c_str()))
             {
-                sendHttpResponse(fd, 500, "application/json", "{\"error\":\"database error\"}", keepAlive);
+                sendJson(fd, 500, "{\"error\":\"database error\"}", keepAlive);
                 return;
             }
 
@@ -491,7 +512,7 @@ void Connection::handleRegister(const std::string &request, int fd, bool keepAli
             if (res && mysql_num_rows(res) > 0)
             {
                 mysql_free_result(res);
-                sendHttpResponse(fd, 409, "application/json", "{\"error\":\"user already exists\"}", keepAlive);
+                sendJson(fd, 409, "{\"error\":\"user already exists\"}", keepAlive);
                 return;
             }
             if (res)
@@ -502,22 +523,12 @@ void Connection::handleRegister(const std::string &request, int fd, bool keepAli
                                  std::string(esc_user) + "','" + std::string(esc_pass) + "')";
             if (mysql_query(conn, insert.c_str()))
             {
-                sendHttpResponse(fd, 500, "application/json", "{\"error\":\"database error\"}", keepAlive);
+                sendJson(fd, 500, "{\"error\":\"database error\"}", keepAlive);
                 return;
             }
 
-            sendHttpResponse(fd, 200, "application/json", "{\"message\":\"register success\"}", keepAlive);
-        }
-        catch (const std::exception &e)
-        {
-            LOG_ERROR("[Register] exception: %s", e.what());
-            sendHttpResponse(fd, 500, "application/json", "{\"error\":\"internal error\"}", keepAlive);
-        }
-        catch (...)
-        {
-            LOG_ERROR("[Register] unknown exception");
-            sendHttpResponse(fd, 500, "application/json", "{\"error\":\"internal error\"}", keepAlive);
-        } });
+            sendJson(fd, 200, "{\"message\":\"register success\"}", keepAlive);
+        }); });
 }
 
 void Connection::handleLogin(const std::string &request, int fd, bool keepAlive)
@@ -525,23 +536,11 @@ void Connection::handleLogin(const std::string &request, int fd, bool keepAlive)
     std::string body = parseBody(request);
     std::string username = getJsonValue(body, "username");
     std::string password = getJsonValue(body, "password");
-
-    if (username.empty() || password.empty())
-    {
-        sendHttpResponse(fd, 400, "application/json", "{\"error\":\"missing username or password\"}", keepAlive);
+    if (!checkCredentials(fd, keepAlive, username, password))
         return;
-    }
-
-    // Enforce length limits: esc_user[129] below holds at most 64*2+1 bytes
-    if (username.size() > config::kMaxUsernameLen || password.size() > config::kMaxPasswordLen)
-    {
-        sendHttpResponse(fd, 400, "application/json", "{\"error\":\"username or password too long\"}", keepAlive);
-        return;
-    }
 
     dbPool_->add([fd, keepAlive, username, password]()
-                 {
-        try
+                 { runDbTask("Login", fd, keepAlive, [&]()
         {
         std::string dbPassword;
         bool found = false;
@@ -566,7 +565,7 @@ void Connection::handleLogin(const std::string &request, int fd, bool keepAlive)
             MYSQL *conn = guard.get();
             if (!conn)
             {
-                sendHttpResponse(fd, 503, "application/json", "{\"error\":\"service unavailable\"}", keepAlive);
+                sendJson(fd, 503, "{\"error\":\"service unavailable\"}", keepAlive);
                 return;
             }
 
@@ -577,7 +576,7 @@ void Connection::handleLogin(const std::string &request, int fd, bool keepAlive)
                                 std::string(esc_user) + "' LIMIT 1";
             if (mysql_query(conn, query.c_str()))
             {
-                sendHttpResponse(fd, 500, "application/json", "{\"error\":\"database error\"}", keepAlive);
+                sendJson(fd, 500, "{\"error\":\"database error\"}", keepAlive);
                 return;
             }
 
@@ -602,13 +601,13 @@ void Connection::handleLogin(const std::string &request, int fd, bool keepAlive)
 
         if (!found)
         {
-            sendHttpResponse(fd, 401, "application/json", "{\"error\":\"user not found\"}", keepAlive);
+            sendJson(fd, 401, "{\"error\":\"user not found\"}", keepAlive);
             return;
         }
 
         if (password != dbPassword)
         {
-            sendHttpResponse(fd, 401, "application/json", "{\"error\":\"wrong password\"}", keepAlive);
+            sendJson(fd, 401, "{\"error\":\"wrong password\"}", keepAlive);
             return;
         }
 
@@ -620,24 +619,14 @@ void Connection::handleLogin(const std::string &request, int fd, bool keepAlive)
         // out a token that would never validate -> report 503 instead.
         if (!RedisPool::getInstance().setex("session:" + token, config::kSessionTtlSec, username))
         {
-            sendHttpResponse(fd, 503, "application/json", "{\"error\":\"service unavailable\"}", keepAlive);
+            sendJson(fd, 503, "{\"error\":\"service unavailable\"}", keepAlive);
             return;
         }
 #endif
 
-        sendHttpResponse(fd, 200, "application/json",
-                         "{\"message\":\"login success\",\"token\":\"" + token + "\"}", keepAlive);
-        }
-        catch (const std::exception &e)
-        {
-            LOG_ERROR("[Login] exception: %s", e.what());
-            sendHttpResponse(fd, 500, "application/json", "{\"error\":\"internal error\"}", keepAlive);
-        }
-        catch (...)
-        {
-            LOG_ERROR("[Login] unknown exception");
-            sendHttpResponse(fd, 500, "application/json", "{\"error\":\"internal error\"}", keepAlive);
-        } });
+        sendJson(fd, 200,
+                 "{\"message\":\"login success\",\"token\":\"" + token + "\"}", keepAlive);
+        }); });
 }
 
 void Connection::handleProfile(const std::string &request, int fd, bool keepAlive)
@@ -645,43 +634,32 @@ void Connection::handleProfile(const std::string &request, int fd, bool keepAliv
     std::string token = parseBearerToken(request);
     if (token.empty())
     {
-        sendHttpResponse(fd, 401, "application/json", "{\"error\":\"missing token\"}", keepAlive);
+        sendJson(fd, 401, "{\"error\":\"missing token\"}", keepAlive);
         return;
     }
 
 #ifdef USE_REDIS
     // Session lookup is a blocking Redis call, keep it off the reactor thread
     dbPool_->add([fd, keepAlive, token]()
-                 {
-        try
+                 { runDbTask("Profile", fd, keepAlive, [&]()
         {
             RedisStatus st;
             std::string username = RedisPool::getInstance().get("session:" + token, &st);
             if (st == RedisStatus::Error)
             {
-                sendHttpResponse(fd, 503, "application/json", "{\"error\":\"service unavailable\"}", keepAlive);
+                sendJson(fd, 503, "{\"error\":\"service unavailable\"}", keepAlive);
                 return;
             }
             if (st == RedisStatus::NotFound || username.empty())
             {
-                sendHttpResponse(fd, 401, "application/json", "{\"error\":\"invalid or expired token\"}", keepAlive);
+                sendJson(fd, 401, "{\"error\":\"invalid or expired token\"}", keepAlive);
                 return;
             }
-            sendHttpResponse(fd, 200, "application/json",
-                             "{\"username\":\"" + jsonEscape(username) + "\"}", keepAlive);
-        }
-        catch (const std::exception &e)
-        {
-            LOG_ERROR("[Profile] exception: %s", e.what());
-            sendHttpResponse(fd, 500, "application/json", "{\"error\":\"internal error\"}", keepAlive);
-        }
-        catch (...)
-        {
-            LOG_ERROR("[Profile] unknown exception");
-            sendHttpResponse(fd, 500, "application/json", "{\"error\":\"internal error\"}", keepAlive);
-        } });
+            sendJson(fd, 200,
+                     "{\"username\":\"" + jsonEscape(username) + "\"}", keepAlive);
+        }); });
 #else
-    sendHttpResponse(fd, 503, "application/json", "{\"error\":\"session store disabled\"}", keepAlive);
+    sendJson(fd, 503, "{\"error\":\"session store disabled\"}", keepAlive);
 #endif
 }
 
@@ -690,109 +668,57 @@ void Connection::handleLogout(const std::string &request, int fd, bool keepAlive
     std::string token = parseBearerToken(request);
     if (token.empty())
     {
-        sendHttpResponse(fd, 401, "application/json", "{\"error\":\"missing token\"}", keepAlive);
+        sendJson(fd, 401, "{\"error\":\"missing token\"}", keepAlive);
         return;
     }
 
 #ifdef USE_REDIS
     dbPool_->add([fd, keepAlive, token]()
-                 {
-        try
+                 { runDbTask("Logout", fd, keepAlive, [&]()
         {
             RedisStatus st = RedisPool::getInstance().del("session:" + token);
             if (st == RedisStatus::Error)
             {
-                sendHttpResponse(fd, 503, "application/json", "{\"error\":\"service unavailable\"}", keepAlive);
+                sendJson(fd, 503, "{\"error\":\"service unavailable\"}", keepAlive);
                 return;
             }
             if (st == RedisStatus::NotFound)
             {
-                sendHttpResponse(fd, 401, "application/json", "{\"error\":\"invalid or expired token\"}", keepAlive);
+                sendJson(fd, 401, "{\"error\":\"invalid or expired token\"}", keepAlive);
                 return;
             }
-            sendHttpResponse(fd, 200, "application/json", "{\"message\":\"logout success\"}", keepAlive);
-        }
-        catch (const std::exception &e)
-        {
-            LOG_ERROR("[Logout] exception: %s", e.what());
-            sendHttpResponse(fd, 500, "application/json", "{\"error\":\"internal error\"}", keepAlive);
-        }
-        catch (...)
-        {
-            LOG_ERROR("[Logout] unknown exception");
-            sendHttpResponse(fd, 500, "application/json", "{\"error\":\"internal error\"}", keepAlive);
-        } });
+            sendJson(fd, 200, "{\"message\":\"logout success\"}", keepAlive);
+        }); });
 #else
-    sendHttpResponse(fd, 503, "application/json", "{\"error\":\"session store disabled\"}", keepAlive);
+    sendJson(fd, 503, "{\"error\":\"session store disabled\"}", keepAlive);
 #endif
 }
 
 // ==================== Main Handler ====================
 
-// Content-Length of a request given its header block (text before \r\n\r\n).
-// Header names are case-insensitive (RFC 9110); returns 0 if absent.
+// Content-Length of a request given its header block (text before \r\n\r\n);
+// returns 0 if absent.
 static size_t requestContentLength(const std::string &headers)
 {
-    size_t p = 0;
-    while (p < headers.size())
-    {
-        size_t e = headers.find("\r\n", p);
-        if (e == std::string::npos)
-            e = headers.size();
-        std::string line = headers.substr(p, e - p);
-        p = e + 2;
-        size_t colon = line.find(':');
-        if (colon == std::string::npos)
-            continue;
-        std::string name = line.substr(0, colon);
-        for (char &c : name)
-            c = (char)std::tolower((unsigned char)c);
-        while (!name.empty() && (name.back() == ' ' || name.back() == '\t'))
-            name.pop_back();
-        if (name == "content-length")
-        {
-            long v = strtol(line.c_str() + colon + 1, nullptr, 10);
-            return v > 0 ? (size_t)v : 0;
-        }
-    }
-    return 0;
+    std::string value = findHeader(headers, "content-length");
+    if (value.empty())
+        return 0;
+    long v = strtol(value.c_str(), nullptr, 10);
+    return v > 0 ? (size_t)v : 0;
 }
 
 // Decide keep-alive: HTTP/1.1 defaults to persistent unless "Connection: close";
 // HTTP/1.0 defaults to close unless "Connection: keep-alive".
 static bool wantKeepAlive(const std::string &request, const std::string &headers)
 {
-    bool http11 = request.find("HTTP/1.1") != std::string::npos;
-    std::string connVal;
-    size_t p = 0;
-    while (p < headers.size())
-    {
-        size_t e = headers.find("\r\n", p);
-        if (e == std::string::npos)
-            e = headers.size();
-        std::string line = headers.substr(p, e - p);
-        p = e + 2;
-        size_t colon = line.find(':');
-        if (colon == std::string::npos)
-            continue;
-        std::string name = line.substr(0, colon);
-        for (char &c : name)
-            c = (char)std::tolower((unsigned char)c);
-        while (!name.empty() && (name.back() == ' ' || name.back() == '\t'))
-            name.pop_back();
-        if (name == "connection")
-        {
-            connVal = line.substr(colon + 1);
-            for (char &c : connVal)
-                c = (char)std::tolower((unsigned char)c);
-            break;
-        }
-    }
+    std::string connVal = findHeader(headers, "connection");
+    for (char &c : connVal)
+        c = (char)std::tolower((unsigned char)c);
     if (connVal.find("close") != std::string::npos)
         return false;
     if (connVal.find("keep-alive") != std::string::npos)
         return true;
-    return http11;
+    return request.find("HTTP/1.1") != std::string::npos;
 }
 
 void Connection::handleMessage()
@@ -882,32 +808,20 @@ void Connection::processRequests(int fd)
             continue;
         }
 
-        // POST routes + protected GET (async via DB thread pool)
+        // POST routes + protected GET: blocking DB work runs on dbPool_.
+        void (Connection::*dbHandler)(const std::string &, int, bool) = nullptr;
         if (method == "POST" && url == "/register")
+            dbHandler = &Connection::handleRegister;
+        else if (method == "POST" && url == "/login")
+            dbHandler = &Connection::handleLogin;
+        else if (method == "POST" && url == "/logout")
+            dbHandler = &Connection::handleLogout;
+        else if (method == "GET" && url == "/profile")
+            dbHandler = &Connection::handleProfile;
+        if (dbHandler)
         {
             LOG_INFO("access %s %s ka=%d -> (async)", method.c_str(), url.c_str(), keepAlive ? 1 : 0);
-            handleRegister(request, fd, keepAlive);
-            if (!keepAlive) return;
-            continue;
-        }
-        if (method == "POST" && url == "/login")
-        {
-            LOG_INFO("access %s %s ka=%d -> (async)", method.c_str(), url.c_str(), keepAlive ? 1 : 0);
-            handleLogin(request, fd, keepAlive);
-            if (!keepAlive) return;
-            continue;
-        }
-        if (method == "POST" && url == "/logout")
-        {
-            LOG_INFO("access %s %s ka=%d -> (async)", method.c_str(), url.c_str(), keepAlive ? 1 : 0);
-            handleLogout(request, fd, keepAlive);
-            if (!keepAlive) return;
-            continue;
-        }
-        if (method == "GET" && url == "/profile")
-        {
-            LOG_INFO("access %s %s ka=%d -> (async)", method.c_str(), url.c_str(), keepAlive ? 1 : 0);
-            handleProfile(request, fd, keepAlive);
+            (this->*dbHandler)(request, fd, keepAlive);
             if (!keepAlive) return;
             continue;
         }

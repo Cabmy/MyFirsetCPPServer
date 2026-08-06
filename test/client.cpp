@@ -1,6 +1,5 @@
 #include "Socket.h"
 #include "Buffer.h"
-#include "Connection.h"
 #include "InetAddress.h"
 #include "util.h"
 #include <iostream>
@@ -9,27 +8,19 @@
 
 int main()
 {
-    // int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    Socket sock;
+    InetAddress addr("127.0.0.1", 8888);
+    sock.connect(&addr);
 
-    // struct sockaddr_in serv_addv;
-    // bzero(&serv_addv, sizeof(serv_addv));
-    // serv_addv.sin_family = AF_INET;
-    // serv_addv.sin_addr.s_addr = inet_addr("127.0.0.1");
-    // serv_addv.sin_port = htons(8888);
+    int sockfd = sock.getFd();
 
-    Socket *sock = new Socket();
-    InetAddress *addr = new InetAddress("127.0.0.1", 8888);
-    sock->connect(addr);
-
-    int sockfd = sock->getFd();
-
-    Buffer *readBuffer = new Buffer();
-    Buffer *sendBuffer = new Buffer();
+    Buffer readBuffer;
+    Buffer sendBuffer;
 
     while (true)
     {
-        sendBuffer->getline();
-        ssize_t write_bytes = write(sockfd, sendBuffer->c_str(), sendBuffer->size());
+        sendBuffer.getline();
+        ssize_t write_bytes = write(sockfd, sendBuffer.c_str(), sendBuffer.size());
         if (write_bytes == -1)
         {
             errif(true, "server socket disconnect");
@@ -45,7 +36,7 @@ int main()
             ssize_t read_bytes = read(sockfd, buf, sizeof(buf));
             if (read_bytes > 0)
             {
-                readBuffer->append(buf, read_bytes);
+                readBuffer.append(buf, read_bytes);
                 already_read += read_bytes;
             }
             else if (read_bytes == 0)
@@ -53,16 +44,14 @@ int main()
                 printf("server disconnected.\n");
                 exit(EXIT_SUCCESS);
             }
-            if (already_read >= sendBuffer->size())
+            if (already_read >= sendBuffer.size())
             {
-                printf("message from server: %s\n", readBuffer->c_str());
+                printf("message from server: %s\n", readBuffer.c_str());
                 break;
             }
         }
-        readBuffer->clear();
+        readBuffer.clear();
     }
 
-    delete addr;
-    delete sock;
     return 0;
 }

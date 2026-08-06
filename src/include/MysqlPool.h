@@ -23,7 +23,6 @@ private:
     std::mutex mtx_;
     std::condition_variable cv_;
     int maxConn_;
-    int freeConn_;
 
     std::string host_;
     std::string user_;

@@ -8,7 +8,6 @@
 class EventLoop;
 class Socket;
 class Channel;
-class Buffer;
 class ThreadPool;
 
 class Connection
@@ -72,6 +71,14 @@ private:
     // Direct best-effort write, used by DB worker threads for small responses.
     static void sendHttpResponse(int fd, int statusCode, const std::string &contentType,
                                  const std::string &body, bool keepAlive);
+    // JSON shorthand over sendHttpResponse (all DB-thread responses are JSON).
+    static void sendJson(int fd, int statusCode, const std::string &body, bool keepAlive);
+    // Shared /register + /login input validation; sends the 400 itself.
+    static bool checkCredentials(int fd, bool keepAlive, const std::string &username,
+                                 const std::string &password);
+    // Run a DB-pool task body with uniform exception handling (logged 500 on throw).
+    static void runDbTask(const char *tag, int fd, bool keepAlive,
+                          const std::function<void()> &work);
 
 public:
     Connection(EventLoop *loop, std::unique_ptr<Socket> sock, ThreadPool *dbPool,

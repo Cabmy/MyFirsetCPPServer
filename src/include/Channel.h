@@ -30,7 +30,6 @@ public:
     uint32_t getRevents();
     bool getInEpoll();
     void setInEpoll();
-    void useET();
 
     void setRevents(uint32_t revents);
     void setCallback(std::function<void()>);

@@ -12,7 +12,7 @@ MysqlPool &MysqlPool::getInstance()
 }
 
 MysqlPool::MysqlPool()
-    : maxConn_(config::kDbMaxConn), freeConn_(0),
+    : maxConn_(config::kDbMaxConn),
       host_(config::dbHost()), user_(config::dbUser()), passwd_(config::dbPasswd()),
       dbName_(config::dbName()), port_(config::dbPort())
 {
@@ -40,16 +40,15 @@ MysqlPool::MysqlPool()
         mysql_set_character_set(conn, "utf8mb4");
 
         pool_.push(conn);
-        ++freeConn_;
     }
 
-    if (freeConn_ == 0)
+    if (pool_.empty())
     {
         LOG_WARN("MysqlPool: no connections created; check MySQL is running and credentials");
     }
     else
     {
-        LOG_INFO("MysqlPool: initialized with %d connections", freeConn_);
+        LOG_INFO("MysqlPool: initialized with %d connections", (int)pool_.size());
     }
 }
 
@@ -75,7 +74,6 @@ MYSQL *MysqlPool::getConn()
 
     MYSQL *conn = pool_.front();
     pool_.pop();
-    --freeConn_;
     return conn;
 }
 
@@ -86,6 +84,5 @@ void MysqlPool::releaseConn(MYSQL *conn)
 
     std::lock_guard<std::mutex> lock(mtx_);
     pool_.push(conn);
-    ++freeConn_;
     cv_.notify_one();
 }

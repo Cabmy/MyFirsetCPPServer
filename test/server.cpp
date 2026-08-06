@@ -31,25 +31,27 @@ int main()
     signal(SIGHUP, SIG_IGN);  // hot-reload removed; ignore rather than let it kill us
     signal(SIGPIPE, SIG_IGN); // writing to a peer-closed socket must not kill us
 
-    EventLoop *loop = new EventLoop();
-    Server *serv = new Server(loop);
+    // Scoped so Server/EventLoop destruct (pools join, connections close)
+    // before the async logger is shut down.
+    {
+        EventLoop loop;
+        Server serv(&loop);
 
-    // Runs once per main-reactor poll iteration (≤1s): honor shutdown + sweep idle.
-    loop->setLoopCallback([&]()
-                          {
-        if (g_shutdown)
-        {
-            LOG_INFO("shutdown signal received, stopping reactors");
-            serv->stop();
-            return;
-        }
-        serv->sweepIdle(); });
+        // Runs once per main-reactor poll iteration (≤1s): honor shutdown + sweep idle.
+        loop.setLoopCallback([&]()
+                             {
+            if (g_shutdown)
+            {
+                LOG_INFO("shutdown signal received, stopping reactors");
+                serv.stop();
+                return;
+            }
+            serv.sweepIdle(); });
 
-    loop->loop(); // blocks until a shutdown signal sets quit_
+        loop.loop(); // blocks until a shutdown signal sets quit_
 
-    LOG_INFO("event loop exited, cleaning up");
-    delete serv; // ThreadPools stop+join, connections closed, pools freed
-    delete loop;
+        LOG_INFO("event loop exited, cleaning up");
+    }
     spdlog::shutdown(); // flush the async logger
     return 0;
 }

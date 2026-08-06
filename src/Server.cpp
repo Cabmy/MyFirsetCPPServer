@@ -8,10 +8,6 @@
 #include "EventLoop.h"
 #include "Config.h"
 #include <functional>
-#include <string.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <errno.h>
 #include <thread>
 #include <ctime>
 #include <sys/socket.h>
@@ -27,12 +23,7 @@ Server::Server(EventLoop *lp) : mainReactor_(lp), acceptor_(nullptr)
     for (int i = 0; i < size; ++i)
     {
         subReactors_.push_back(std::make_unique<EventLoop>());
-    }
-
-    for (int i = 0; i < size; ++i)
-    {
-        std::function<void()> sub_loop = std::bind(&EventLoop::loop, subReactors_[i].get());
-        thPool_->add(sub_loop);
+        thPool_->add(std::bind(&EventLoop::loop, subReactors_.back().get()));
     }
 
     // DB thread pool for blocking MySQL/Redis operations
@@ -50,11 +41,11 @@ void Server::newConnection(std::unique_ptr<Socket> sock)
         return;
     }
     int fd = sock->getFd();
-    int random = fd % subReactors_.size();
+    int idx = fd % subReactors_.size();
     // Pass the delete callback into the ctor so it is set before the channel
     // is registered to epoll (avoids the early-event null-callback race).
     std::function<void(int)> cb = std::bind(&Server::deleteConnection, this, std::placeholders::_1);
-    auto conn = std::make_unique<Connection>(subReactors_[random].get(), std::move(sock), dbPool_.get(), cb);
+    auto conn = std::make_unique<Connection>(subReactors_[idx].get(), std::move(sock), dbPool_.get(), cb);
     {
         std::lock_guard<std::mutex> lock(connMtx_);
         connections_[fd] = std::move(conn);

@@ -6,9 +6,9 @@
 #include "Log.h"
 #include "Channel.h"
 
-#define MAX_EVENTS_ 4096
+static constexpr int kMaxEvents = 4096;
 
-Epoll::Epoll() : epfd_(-1), events_(MAX_EVENTS_)
+Epoll::Epoll() : epfd_(-1), events_(kMaxEvents)
 {
     epfd_ = epoll_create1(0);
     errif(epfd_ == -1, "epoll create error");
@@ -23,20 +23,10 @@ Epoll::~Epoll()
     }
 }
 
-// void Epoll::addFd(int fd, uint32_t op)
-// {
-//     struct epoll_event ev;
-//     bzero(&ev, sizeof(ev));
-
-//     ev.data.fd = fd;
-//     ev.events = op;
-//     errif(epoll_ctl(epfd_, EPOLL_CTL_ADD, fd, &ev) == -1, "epoll add event error");
-// }
-
 std::vector<Channel *> Epoll::activeChannels(int timeout)
 {
     std::vector<Channel *> activeChannels;
-    int nfds = epoll_wait(epfd_, events_.data(), MAX_EVENTS_, timeout);
+    int nfds = epoll_wait(epfd_, events_.data(), kMaxEvents, timeout);
     if (nfds == -1) {
         if (errno == EINTR) return {};
         // A transient epoll_wait error must NOT kill the whole server; log and
